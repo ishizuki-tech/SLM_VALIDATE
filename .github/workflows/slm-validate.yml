@@ -49,9 +49,11 @@ jobs:
           key: models-${{ hashFiles('download.sh') }}
 
       - name: Run download.sh
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           chmod +x download.sh
-          ./download.sh
+          ./download.sh -d models --verify
 
       - name: Run main.py (batch)
         run: |
