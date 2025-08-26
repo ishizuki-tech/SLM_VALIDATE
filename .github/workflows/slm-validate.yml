@@ -93,7 +93,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python jsonl_to_readme.py results.jsonl > OUTPUT.md
+          python jsonl_to_readme.py results.jsonl --out OUTPUT.md --title "QA Evaluation Results (Model-Only)."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -113,7 +113,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python all_prompts_to_readme.py all.prompts.jsonl > PROMPTS.md || true
+          python all_prompts_to_readme.py all.prompts.jsonl PROMPTS.md      
 
       - name: Upload prompts README (optional)
         uses: actions/upload-artifact@v4
