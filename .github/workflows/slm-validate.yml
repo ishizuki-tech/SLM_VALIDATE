@@ -55,45 +55,39 @@ jobs:
           chmod +x download.sh
           ./download.sh -d models --verify
 
-      - name: Run main.py (batch)
+      - name: Clean previous outputs (fresh run)
         run: |
           set -e
-          mkdir -p runs
-          # Try to detect the first GGUF downloaded by download.sh
-          MODEL_PATH="${MODEL_PATH:-$(ls -1 models/*.gguf 2>/dev/null | head -n1)}"
+          rm -f results.jsonl results.csv OUTPUT.md || true
+          rm -rf logs runs || true
+          mkdir -p logs runs
+
+      - name: Run evaluator (batch)
+        run: |
+          set -e
+          MODEL_PATH="${MODEL_PATH:-$(ls -1 ./models/*.gguf 2>/dev/null | head -n1)}"
           if [ -z "$MODEL_PATH" ]; then
-            echo "No .gguf model found in ./models. Set MODEL_PATH or make download.sh put a file there." >&2
+            echo "No .gguf model found under ./models" >&2
             exit 1
           fi
+          python main.py \
+            --model "$MODEL_PATH" \
+            --input-jsonl survey_inputs.jsonl \
+            --output-jsonl results.jsonl \
+            --prompts-jsonl logs/all.prompts.jsonl \
+            --out-csv results.csv \
+            --quiet-batch
 
-          # If you have a JSONL dataset, keep this; otherwise switch to --try-defaults
-          if [ -f data/input.jsonl ]; then
-            python main.py \
-              --model "$MODEL_PATH" \
-              --input-jsonl data/input.jsonl \
-              --output-jsonl runs/out.jsonl \
-              --out-csv runs/out.csv \
-              --quiet-batch
-          else
-            echo "data/input.jsonl not found; running built-in defaults."
-            python main.py \
-              --model "$MODEL_PATH" \
-              --try-defaults \
-              --print-one-line | tee runs/out.jsonl
-            # create a minimal CSV too
-            echo 'id,specificity,detail,usability,clarity,completeness,relevance,canonical_json,question,answer' > runs/out.csv
-          fi
-
-      - name: Generate README from JSONL
+      - name: Generate OUTPUT from JSONL
         run: |
           set -e
           # Prefer an executable script; fall back to Python names
           if [ -x scripts/jsonl_to_readmewo ]; then
-            scripts/jsonl_to_readmewo runs/out.jsonl > README.md
+            scripts/jsonl_to_readmewo runs/out.jsonl > OUTPUT.md
           elif [ -f scripts/jsonl_to_readmewo.py ]; then
-            python scripts/jsonl_to_readmewo.py runs/out.jsonl > README.md
+            python scripts/jsonl_to_readmewo.py runs/out.jsonl > OUTPUT.md
           elif [ -f scripts/jsonl_to_readme.py ]; then
-            python scripts/jsonl_to_readme.py runs/out.jsonl > README.md
+            python scripts/jsonl_to_readme.py runs/out.jsonl > OUTPUT.md
           else
             echo "Converter script not found (scripts/jsonl_to_readmewo[.py] or jsonl_to_readme.py)." >&2
             exit 1
@@ -106,12 +100,12 @@ jobs:
           path: |
             runs/out.jsonl
             runs/out.csv
-            README.md
+            OUTPUT.md
 
       # Optional: auto-commit README & outputs back to the repo
-      - name: Commit README (optional)
+      - name: Commit OUTPUT (optional)
         if: ${{ success() }}
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "CI: update README from JSONL"
-          file_pattern: README.md runs/out.jsonl runs/out.csv
+          commit_message: "CI: update OUTPUT from JSONL"
+          file_pattern: OUTPUT.md runs/out.jsonl runs/out.csv
