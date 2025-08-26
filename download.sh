@@ -1,13 +1,12 @@
-#!/usr/bin/env zsh
-# get_gemma_q4km.zsh — Zsh downloader for gemma-3-1b-it-q4_k_m.gguf
+#!/usr/bin/env bash
+# get_gemma_q4km.sh — Bash downloader for gemma-3-1b-it-q4_k_m.gguf
 # Examples:
-#   HF_TOKEN=hf_xxx ./get_gemma_q4km.zsh
-#   HF_TOKEN=hf_xxx ./get_gemma_q4km.zsh -d ./gguf --verify
-#   HF_TOKEN=hf_xxx ./get_gemma_q4km.zsh --mirror https://huggingface.co/someone/repo/resolve/main
-#   ./get_gemma_q4km.zsh --public --sha256 8270790f3ab6...   # verify with a known hash
+#   HF_TOKEN=hf_xxx ./get_gemma_q4km.sh
+#   HF_TOKEN=hf_xxx ./get_gemma_q4km.sh -d ./gguf --verify
+#   HF_TOKEN=hf_xxx ./get_gemma_q4km.sh --mirror https://huggingface.co/someone/repo/resolve/main
+#   ./get_gemma_q4km.sh --public --sha256 8270790f3ab6...   # verify with a known hash
 
 set -euo pipefail
-setopt pipefail
 
 # ---------------- Defaults ----------------
 DEST_DIR="${DEST_DIR:-models}"
@@ -23,7 +22,7 @@ MIRRORS=(
   "https://huggingface.co/DravenBlack/gemma-3-1b-it-Q4_K_M-GGUF/resolve/main"
   "https://huggingface.co/mradermacher/gemma-3-1b-it-GGUF/resolve/main"
 )
-RETRIES=${RETRIES:-5}
+RETRIES="${RETRIES:-5}"
 QUIET=false
 FORCE=false
 VERIFY=false
@@ -31,8 +30,8 @@ PUBLIC=false
 EXPECTED_SHA=""
 
 # --------------- Helpers ------------------
-log() { $QUIET || print -r -- "$*"; }
-err() { print -ru2 -- "$*"; }
+log() { [[ "$QUIET" == true ]] || printf '%s\n' "$*"; }
+err() { printf '%s\n' "$*" >&2; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 sha256_of() {
@@ -48,12 +47,16 @@ fetch_sidecar_sha() {
   local base="$1" file="$2" token="${3:-}" tmp
   tmp="$(mktemp -t gemma.sha.XXXXXX)"
   if have curl; then
-    if curl -fsSL ${token:+-H "Authorization: Bearer ${token}"} "${base%/}/${file}.sha256" -o "$tmp"; then
+    local curl_args=(-fsSL)
+    [[ -n "$token" ]] && curl_args+=(-H "Authorization: Bearer ${token}")
+    if curl "${curl_args[@]}" "${base%/}/${file}.sha256" -o "$tmp"; then
       grep -Eo '[A-Fa-f0-9]{64}' "$tmp" | head -n1
       rm -f "$tmp"; return 0
     fi
   elif have wget; then
-    if wget -q ${token:+--header="Authorization: Bearer ${token}"} -O "$tmp" "${base%/}/${file}.sha256"; then
+    local wget_args=(-q)
+    [[ -n "$token" ]] && wget_args+=(--header="Authorization: Bearer ${token}")
+    if wget "${wget_args[@]}" -O "$tmp" "${base%/}/${file}.sha256"; then
       grep -Eo '[A-Fa-f0-9]{64}' "$tmp" | head -n1
       rm -f "$tmp"; return 0
     fi
@@ -67,12 +70,13 @@ download_with_resume() {
   local tmp="${dest}.part"
 
   if have curl; then
-    curl -fL --retry "$RETRIES" --retry-delay 2 --retry-all-errors -C - \
-         ${token:+-H "Authorization: Bearer ${token}"} \
-         -o "$tmp" "$url"
+    local curl_args=(-fL --retry "$RETRIES" --retry-delay 2 --retry-all-errors -C - -o "$tmp")
+    [[ -n "$token" ]] && curl_args+=(-H "Authorization: Bearer ${token}")
+    curl "${curl_args[@]}" "$url"
   elif have wget; then
-    wget -c --tries="$RETRIES" ${token:+--header="Authorization: Bearer ${token}"} \
-         -O "$tmp" "$url"
+    local wget_args=(-c --tries="$RETRIES" -O "$tmp")
+    [[ -n "$token" ]] && wget_args+=(--header="Authorization: Bearer ${token}")
+    wget "${wget_args[@]}" "$url"
   else
     err "❌ Neither curl nor wget is installed."
     return 2
@@ -83,8 +87,11 @@ download_with_resume() {
 verify_sha() {
   local file="$1" expect="$2"
   local actual; actual="$(sha256_of "$file")" || return 1
-  if [[ "${actual:l}" != "${expect:l}" ]]; then
-    err "❌ SHA256 mismatch for $(basename "$file")\n   expected: $expect\n   actual  : $actual"
+  # bash lowercase
+  if [[ "${actual,,}" != "${expect,,}" ]]; then
+    err "❌ SHA256 mismatch for $(basename "$file")"
+    err "   expected: $expect"
+    err "   actual  : $actual"
     return 2
   fi
   log "✅ SHA256 verified: $file"
@@ -92,7 +99,7 @@ verify_sha() {
 
 usage() {
   cat <<'USAGE'
-Usage: get_gemma_q4km.zsh [options]
+Usage: get_gemma_q4km.sh [options]
 Options:
   -d, --dest DIR          Destination directory (default: models)
   -m, --mirror URL        Add an extra mirror (can repeat)
@@ -108,9 +115,9 @@ USAGE
 
 # --------------- Parse args ---------------
 HF_TOKEN="${HF_TOKEN:-}"
-extra_mirrors=()
+declare -a extra_mirrors=()
 
-while (( $# > 0 )); do
+while [[ $# -gt 0 ]]; do
   case "$1" in
     -d|--dest) DEST_DIR="$2"; shift 2 ;;
     -m|--mirror) extra_mirrors+=("$2"); shift 2 ;;
@@ -126,7 +133,7 @@ while (( $# > 0 )); do
   esac
 done
 
-if (( ${#extra_mirrors[@]} )); then
+if [[ ${#extra_mirrors[@]} -gt 0 ]]; then
   MIRRORS+=("${extra_mirrors[@]}")
 fi
 
@@ -139,10 +146,10 @@ fi
 mkdir -p -- "$DEST_DIR"
 log "📁 Destination: $DEST_DIR"
 log "🌐 Mirrors:"; for m in "${MIRRORS[@]}"; do log "   - $m"; done
-$VERIFY && log "🔒 Verification enabled."
+[[ "$VERIFY" == true ]] && log "🔒 Verification enabled."
 
-target=""
 ok=false
+target=""
 
 for fname in "${CANDIDATE_FILES[@]}"; do
   for base in "${MIRRORS[@]}"; do
@@ -151,14 +158,16 @@ for fname in "${CANDIDATE_FILES[@]}"; do
 
     if [[ -f "$target" && "$FORCE" == false ]]; then
       log "✅ Exists: $target (use --force to re-download)"
-      # If verify requested and a SHA is provided/available, still verify
-      if $VERIFY; then
+      if [[ "$VERIFY" == true ]]; then
         exp="$EXPECTED_SHA"
         if [[ -z "$exp" ]]; then
           exp="$(fetch_sidecar_sha "$base" "$fname" "$HF_TOKEN" || true)"
         fi
         if [[ -n "$exp" ]]; then
-          verify_sha "$target" "$exp" || { err "Existing file failed verification."; exit 2; }
+          if ! verify_sha "$target" "$exp"; then
+            err "Existing file failed verification."
+            exit 2
+          fi
         fi
       fi
       ok=true; break
@@ -167,13 +176,16 @@ for fname in "${CANDIDATE_FILES[@]}"; do
     log "⬇️  Downloading: $url"
     if download_with_resume "$url" "$target" "${HF_TOKEN:-}"; then
       log "✅ Saved: $target"
-      if $VERIFY; then
+      if [[ "$VERIFY" == true ]]; then
         exp="$EXPECTED_SHA"
         if [[ -z "$exp" ]]; then
           exp="$(fetch_sidecar_sha "$base" "$fname" "$HF_TOKEN" || true)"
         fi
         if [[ -n "$exp" ]]; then
-          verify_sha "$target" "$exp" || { mv -f "$target" "${target}.bad.$(date +%s)"; continue }
+          if ! verify_sha "$target" "$exp"; then
+            mv -f "$target" "${target}.bad.$(date +%s)"
+            continue
+          fi
         else
           log "ℹ️  No sidecar SHA found; skipped verification."
         fi
@@ -184,11 +196,11 @@ for fname in "${CANDIDATE_FILES[@]}"; do
       [[ -f "$target.part" ]] && rm -f "$target.part"
     fi
   done
-  $ok && break
+  [[ "$ok" == true ]] && break
 done
 
-if ! $ok; then
-  err "💥 All attempts failed for: ${CANDIDATE_FILES[1]}"
+if [[ "$ok" != true ]]; then
+  err "💥 All attempts failed for candidates: ${CANDIDATE_FILES[*]}"
   exit 1
 fi
 
