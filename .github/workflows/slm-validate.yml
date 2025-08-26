@@ -72,9 +72,9 @@ jobs:
           fi
           python main.py \
             --model "$MODEL_PATH" \
-            --input-jsonl survey_inputs.jsonl \
+            --input-jsonl survey_inputs_00.jsonl \
             --output-jsonl results.jsonl \
-            --prompts-jsonl logs/all.prompts.jsonl \
+            --prompts-jsonl all.prompts.jsonl \
             --out-csv results.csv \
             --quiet-batch
 
