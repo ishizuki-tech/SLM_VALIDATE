@@ -6,20 +6,21 @@ on:
     paths:
       - 'download.sh'
       - 'main.py'
-      - 'scripts/**'
-      - 'data/**'
+      - 'jsonl_to_readme.py'
+      - 'all_prompts_to_readme.py'
       - 'requirements.txt'
       - '.github/workflows/slm-validate.yml'
 
 concurrency:
-  group: slm-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
-      contents: write   # needed only if you want to commit README/artifacts back
+      contents: write   # README/成果物のコミットに必要
 
     steps:
       - name: Checkout
@@ -34,11 +35,14 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
+            # 最低限。llama-cpp-python はビルドが走る可能性あり（CPU想定）
             pip install -U llama-cpp-python rich
           fi
 
@@ -47,29 +51,36 @@ jobs:
         with:
           path: models
           key: models-${{ hashFiles('download.sh') }}
+          restore-keys: |
+            models-
 
       - name: Run download.sh
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
         run: |
+          set -euo pipefail
           chmod +x download.sh
           ./download.sh -d models --verify
 
       - name: Clean previous outputs (fresh run)
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           rm -f results.jsonl results.csv OUTPUT.md || true
           rm -rf logs runs || true
           mkdir -p logs runs
 
       - name: Run evaluator (batch)
+        shell: bash
         run: |
-          set -e
-          MODEL_PATH="${MODEL_PATH:-$(ls -1 ./models/*.gguf 2>/dev/null | head -n1)}"
-          if [ -z "$MODEL_PATH" ]; then
-            echo "No .gguf model found under ./models" >&2
+          set -euo pipefail
+          MODEL_PATH="${MODEL_PATH:-$(ls -1 ./models/*.gguf 2>/dev/null | head -n1 || true)}"
+          if [ -z "${MODEL_PATH:-}" ]; then
+            echo "ERROR: No .gguf model found under ./models" >&2
             exit 1
           fi
+          echo "Using model: $MODEL_PATH"
           python main.py \
             --model "$MODEL_PATH" \
             --input-jsonl survey_inputs_00.jsonl \
@@ -79,28 +90,38 @@ jobs:
             --quiet-batch
 
       - name: Generate OUTPUT from JSONL
+        shell: bash
         run: |
-          set -e
-          # Prefer an executable script; fall back to Python names
-          if [ -x scripts/jsonl_to_readmewo ]; then
-            scripts/jsonl_to_readmewo runs/out.jsonl > OUTPUT.md
-          elif [ -f scripts/jsonl_to_readmewo.py ]; then
-            python scripts/jsonl_to_readmewo.py runs/out.jsonl > OUTPUT.md
-          elif [ -f scripts/jsonl_to_readme.py ]; then
-            python scripts/jsonl_to_readme.py runs/out.jsonl > OUTPUT.md
-          else
-            echo "Converter script not found (scripts/jsonl_to_readmewo[.py] or jsonl_to_readme.py)." >&2
-            exit 1
-          fi
+          set -euo pipefail
+          python jsonl_to_readme.py results.jsonl > OUTPUT.md
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
+        if: ${{ always() }}
         with:
           name: slm-results
           path: |
-            runs/out.jsonl
-            runs/out.csv
+            results.jsonl
+            results.csv
             OUTPUT.md
+            logs/**
+          if-no-files-found: ignore
+
+      # Optional: 追加で all.prompts.jsonl → README を作る場合
+      - name: (Optional) Generate PROMPTS.md from all.prompts.jsonl
+        if: ${{ success() && hashFiles('all_prompts_to_readme.py') != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python all_prompts_to_readme.py all.prompts.jsonl > PROMPTS.md || true
+
+      - name: Upload prompts README (optional)
+        uses: actions/upload-artifact@v4
+        if: ${{ always() }}
+        with:
+          name: slm-prompts
+          path: PROMPTS.md
+          if-no-files-found: ignore
 
       # Optional: auto-commit README & outputs back to the repo
       - name: Commit OUTPUT (optional)
@@ -108,4 +129,8 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "CI: update OUTPUT from JSONL"
-          file_pattern: OUTPUT.md runs/out.jsonl runs/out.csv
+          file_pattern: |
+            OUTPUT.md
+            PROMPTS.md
+            results.jsonl
+            results.csv
