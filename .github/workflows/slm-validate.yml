@@ -6,6 +6,8 @@ on:
     paths:
       - 'download.sh'
       - 'main.py'
+      - 'prompts.yaml'
+      - '_input_survey_.jsonl'
       - 'jsonl_to_readme.py'
       - 'all_prompts_to_readme.py'
       - 'requirements.txt'
@@ -72,6 +74,13 @@ jobs:
 
       - name: Run evaluator (batch)
         shell: bash
+        env:
+          # prevent some BLAS libs from over-threading on GitHub runners
+          OMP_NUM_THREADS: 1
+          OPENBLAS_NUM_THREADS: 1
+          MKL_NUM_THREADS: 1
+          VECLIB_MAXIMUM_THREADS: 1
+          NUMEXPR_NUM_THREADS: 1
         run: |
           set -euo pipefail
           MODEL_PATH="${MODEL_PATH:-$(ls -1 ./models/*.gguf 2>/dev/null | head -n1 || true)}"
@@ -80,6 +89,14 @@ jobs:
             exit 1
           fi
           echo "Using model: $MODEL_PATH"
+          if [ ! -f _input_survey_.jsonl ]; then
+            echo "ERROR: _input_survey_.jsonl not found" >&2
+            exit 1
+          fi
+          if [ ! -f prompts.yaml ]; then
+            echo "ERROR: prompts.yaml not found" >&2
+            exit 1
+          fi
           python main.py \
             --model "$MODEL_PATH" \
             --input-jsonl _input_survey_.jsonl \
@@ -93,7 +110,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python jsonl_to_readme.py OUT_results.jsonl --out OUT_README.md --title "QA Evaluation Results (Model-Only)."
+          if [ -f jsonl_to_readme.py ]; then
+            python jsonl_to_readme.py OUT_results.jsonl --out OUT_README.md --title "QA Evaluation Results (Model-Only)."
+          else
+            echo "jsonl_to_readme.py not found, skipping."
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -122,15 +143,23 @@ jobs:
           path: OUT_PROMPTS.md
           if-no-files-found: ignore
 
+      - name: Show outputs & git status (debug)
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== ls -al =="
+          ls -al
+          echo "== git status (before) =="
+          git status
+          echo "== preview add (intent-to-add) =="
+          git add -N OUT_* || true
+          git status
+
       - name: Commit outputs back to repo
         if: ${{ success() }}
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "CI: update outputs from JSONL"
-          file_pattern: |
-            OUT_eval_results.yaml
-            OUT_results.jsonl
-            OUT_results.csv
-            OUT_README.md
-            OUT_PROMPTS.md
-            OUT_all_prompts.jsonl
+          add_options: "-A"
+          file_pattern: "OUT_*"
