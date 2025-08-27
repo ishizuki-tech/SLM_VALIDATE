@@ -280,3 +280,6 @@ jobs:
 ## License
 
 Add your preferred license (e.g., MIT or Apache-2.0).
+
+
+python csv_to_jsonl.py -i QAPairs.csv -o inputs_survey.jsonl

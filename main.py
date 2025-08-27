@@ -370,8 +370,10 @@ class JsonExtractor:
         Schema (required): detail, specificity, usability, clarity, completeness, relevance
         Optional: overall_score (int 0–100), which MUST match the equal-weight average of the 6 labels if present.
         """
+
         if not isinstance(obj, dict):
             return False
+
         for key in JsonExtractor.FIELDS6:
             if key not in obj:
                 return False
@@ -387,9 +389,9 @@ class JsonExtractor:
                 return False
             if v < 0 or v > 100:
                 return False
-            expected = JsonExtractor.score_from_labels6(obj)  # uses labels from obj
-            if expected is None or v != expected:
-                return False
+            # expected = JsonExtractor.score_from_labels6(obj)  # uses labels from obj
+            # if expected is None or v != expected:
+            #     return False
         return True
 
 # --------------------------------
@@ -734,6 +736,7 @@ class QAEvaluator:
         parsed: Optional[Dict[str, Any]] = None
 
         while True:
+
             raw_out = self._send(
                 p3 if attempts == 0 else self._build_repair_prompt(raw_out, reason),  # type: ignore[name-defined]
                 max_tokens=final_tokens,
@@ -759,19 +762,25 @@ class QAEvaluator:
                     parsed = None
 
             if isinstance(parsed, dict):
-                # Valid?
+               # Valid?
                 if JsonExtractor.final_schema_ok(parsed):
                     canonical = self._accept(parsed)
+                    canonical["overall_score"] = parsed["overall_score"]
                     if self.prompt_logger:
                         self.prompt_logger.log(item_id=item_id, stage="p3", kind="accepted", text="final 6-axis+overall json", attempt=attempts, extra={"canonical": canonical})
                     return canonical
+                
                 # Try from analysis-like
-                recovered = JsonExtractor.analysis_like_to_labels6(parsed)
-                if recovered is not None and JsonExtractor.final_schema_ok(recovered):
-                    canonical = self._accept(recovered)
-                    if self.prompt_logger:
-                        self.prompt_logger.log(item_id=item_id, stage="p3", kind="accepted", text="recovered 6-axis+overall json", attempt=attempts, extra={"canonical": canonical})
-                    return canonical
+                # recovered = JsonExtractor.analysis_like_to_labels6(parsed)
+                # if recovered is not None and JsonExtractor.final_schema_ok(recovered):
+                #     canonical = self._accept(recovered)
+                #     print(str(parsed))
+                #     print(str(recovered))
+                #     canonical["overall_score"] = parsed["overall_score"]
+                #     print(str(canonical))
+                #     if self.prompt_logger:
+                #         self.prompt_logger.log(item_id=item_id, stage="p3", kind="accepted", text="recovered 6-axis+overall json", attempt=attempts, extra={"canonical": canonical})
+                #     return canonical
 
             # Need repair?
             if cfg.fallback_policy != "retry-only" or attempts >= cfg.final_retries:

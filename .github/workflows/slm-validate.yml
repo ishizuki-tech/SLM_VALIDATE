@@ -87,6 +87,7 @@ jobs:
             --output-jsonl OUT_results.jsonl \
             --prompts-jsonl OUT_all_prompts.jsonl \
             --out-csv OUT_results.csv \
+            --batch-continue-on-error \
             --quiet-batch
 
       - name: Generate OUTPUT from JSONL

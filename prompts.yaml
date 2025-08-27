@@ -50,24 +50,23 @@ templates:
       Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.
       The first character must be '{{' and the last must be '}}'.
       No prose. Do NOT include ```json, ``` or any code fences.
-      Never output placeholders like <label> or <string>. If uncertain, use "Medium".
+      Never output placeholders like <label> or <string>. If uncertain, use "Very Low".
       Task: Judge how well the Answer addresses the Question using the Question, Answer, and Analysis.
 
       Allowed labels: Very High, High, Medium, Low, Very Low.
       Required JSON keys (7 total): detail, specificity, usability, clarity, completeness, relevance, overall_score.
+      
       Rules:
+
       - detail, specificity, usability, clarity, completeness, relevance → one allowed label each, chosen ONLY from the Allowed labels.
+        Allowed labels: Very High, High, Medium, Low, Very Low.
+
       - overall_score → MUST be computed, not guessed. Strictly follow this procedure:
-        • Convert each label to a number: Very High=95, High=80, Medium=60, Low=40, Very Low=20.
-        • Take the average of all 6 values with equal weight.
-        • Round to the nearest integer.
-        • Clamp the result to 0–100.
-        • Never output an overall_score that is inconsistent with the 6 labels.
-
-      Example:
-      {{"detail":"Low","specificity":"Low","usability":"Low","clarity":"Low","completeness":"Low","relevance":"Medium","overall_score":43}}
-
-      If conflicts exist between Analysis and the actual Q&A, prioritize the Q&A.
+          Convert each label to a number: Very High=95, High=80, Medium=60, Low=40, Very Low=20.
+          Take the average of all 6 values with equal weight.
+          Round to the nearest integer.
+          Clamp the result to 0–100.
+          Never output an overall_score that is inconsistent with the 6 labels.
 
       Question: {question}
       Answer: {answer}
@@ -85,8 +84,7 @@ prompts:
       Allowed labels: Very High, High, Medium, Low, Very Low.
       Required JSON keys (4 total): specificity, detail, usability, weaknesses.
       Rules:
-      - Inspect canopy-specific Answer.
-      - specificity, detail, usability → one allowed label each. Focus on details about leaf coverage and growth stage.
+      - specificity, detail, usability → one allowed label each.
       - weaknesses → short free-text string (≤ 140 chars).
       - Never output an empty string or placeholder for weaknesses.
 

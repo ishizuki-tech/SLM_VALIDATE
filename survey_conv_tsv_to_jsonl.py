@@ -16,7 +16,7 @@ def normalize_fieldnames(fieldnames):
         return []
     return [fn.replace("\u00a0", " ").strip() if fn else "" for fn in fieldnames]
 
-def convert_csv_to_jsonl(input_file: str, output_file: str) -> None:
+def convert_tsv_to_jsonl(input_file: str, output_file: str) -> None:
     with open(input_file, newline='', encoding="utf-8") as f:
         reader = csv.DictReader(f, delimiter="\t")
 
@@ -44,4 +44,4 @@ if __name__ == "__main__":
         print("Usage: python convert_survey.py input.tsv output.jsonl")
         sys.exit(1)
 
-    convert_csv_to_jsonl(sys.argv[1], sys.argv[2])
+    convert_tsv_to_jsonl(sys.argv[1], sys.argv[2])
