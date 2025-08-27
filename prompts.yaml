@@ -1,0 +1,103 @@
+templates:
+  default:
+    p1: |
+      Inspect the following Question and Answer.
+      Task: Provide a short evaluation of the Answer, focusing only on specificity, detail, and usability, plus main weaknesses.
+
+      Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.
+      The first character must be '{{' and the last must be '}}'.
+      Do NOT include ```json, ``` or any code fences.
+      Never output placeholders like <label> or <string>. If uncertain, use "Medium".
+
+      Allowed labels: Very High, High, Medium, Low, Very Low.
+      Required JSON keys (4 total): specificity, detail, usability, weaknesses.
+      Rules:
+      - specificity, detail, usability → one allowed label each.
+      - weaknesses → short free-text string (≤ 140 chars).
+      - Never output an empty string or placeholder for weaknesses.
+
+      Example:
+      {{"specificity":"Low","detail":"Medium","usability":"Low","weaknesses":"Too vague and lacks numeric values."}}
+
+      Question: {question}
+      Answer: {answer}
+
+    p2: |
+      Inspect the Question, Answer, and prior Analysis.
+      Task: Decide whether the Answer contains enough information to fully and practically address the Question.
+      Assess based on: coverage of all asked parts, concrete specifics (numbers, names, steps, conditions), reasoning/evidence, stated assumptions, constraints/edge cases, and actionability.
+
+      Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.
+      The first character must be '{{' and the last must be '}}'.
+      Do NOT include ```json, ``` or any code fences.
+      Never output placeholders like <label> or <string>. If uncertain, use "Medium".
+
+      Allowed labels: Very High, High, Medium, Low, Very Low.
+      Required JSON keys (4 total): completeness, clarity, relevance, weaknesses.
+      Rules:
+      - completeness, clarity, relevance → one allowed label each.
+      - weaknesses → short free-text string (≤ 140 chars).
+      - Never output an empty string or placeholder for weaknesses.
+
+      Example:
+      {{"completeness":"Low","clarity":"Medium","relevance":"High","weaknesses":"No numeric target and lacks supporting context."}}
+
+      Question: {question}
+      Answer: {answer}
+      Analysis: {prev_json}
+
+    p3: |
+      Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.
+      The first character must be '{{' and the last must be '}}'.
+      No prose. Do NOT include ```json, ``` or any code fences.
+      Never output placeholders like <label> or <string>. If uncertain, use "Medium".
+      Task: Judge how well the Answer addresses the Question using the Question, Answer, and Analysis.
+
+      Allowed labels: Very High, High, Medium, Low, Very Low.
+      Required JSON keys (7 total): detail, specificity, usability, clarity, completeness, relevance, overall_score.
+      Rules:
+      - detail, specificity, usability, clarity, completeness, relevance → one allowed label each, chosen ONLY from the Allowed labels.
+      - overall_score → MUST be computed, not guessed. Strictly follow this procedure:
+        • Convert each label to a number: Very High=95, High=80, Medium=60, Low=40, Very Low=20.
+        • Take the average of all 6 values with equal weight.
+        • Round to the nearest integer.
+        • Clamp the result to 0–100.
+        • Never output an overall_score that is inconsistent with the 6 labels.
+
+      Example:
+      {{"detail":"Low","specificity":"Low","usability":"Low","clarity":"Low","completeness":"Low","relevance":"Medium","overall_score":43}}
+
+      If conflicts exist between Analysis and the actual Q&A, prioritize the Q&A.
+
+      Question: {question}
+      Answer: {answer}
+      Analysis: {prev_json}
+
+prompts:
+  - question: "After planting, what share of seeds do you expect to grow into healthy plants?"
+    template: default
+    p1: |
+      Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.
+      The first character must be '{{' and the last must be '}}'.
+      Do NOT include ```json, ``` or any code fences.
+      Never output placeholders like <label> or <string>. If uncertain, use "Medium".
+
+      Allowed labels: Very High, High, Medium, Low, Very Low.
+      Required JSON keys (4 total): specificity, detail, usability, weaknesses.
+      Rules:
+      - Inspect canopy-specific Answer.
+      - specificity, detail, usability → one allowed label each. Focus on details about leaf coverage and growth stage.
+      - weaknesses → short free-text string (≤ 140 chars).
+      - Never output an empty string or placeholder for weaknesses.
+
+      Example:
+      {{"specificity":"Low","detail":"Medium","usability":"Low","weaknesses":"Too vague and lacks numeric values."}}
+
+      Question: {question}
+      Answer: {answer}  
+
+  - question: "By six weeks after planting, how much of the ground should be covered by the crop’s leaves?"
+    template: default
+
+  - question: "By eight weeks after planting, how much of the ground should be covered by the crop’s leaves?"
+    template: default

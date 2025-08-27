@@ -25,6 +25,12 @@ import re
 import sys
 import inspect
 import signal
+import yaml
+import json
+
+from pathlib import Path
+from typing import Optional, Dict
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple
@@ -172,55 +178,64 @@ class PromptLogger:
         if per_item:
             self._write_line(per_item, line)
 
-# --------------------------------
-# PromptBuilder (Gemma user-blocks; wrapper is applied later)
-# --------------------------------
+import yaml
+
 class PromptBuilder:
+
     def __init__(self, filepath: Optional[str] = None):
+        self.templates: Dict[str, Dict[str, str]] = {}
         self.prompts: Dict[str, Dict[str, str]] = {}
+
+        print("=== DEBUG filepath:", filepath)
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        print("=== DEBUG type(data):", type(data))
+
         if filepath:
             try:
                 p = Path(filepath)
                 if p.exists():
                     with open(filepath, "r", encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            obj = json.loads(line)
-                            q = obj["question"].strip()
-                            self.prompts[q] = {
-                                "p1": obj.get("p1", ""),
-                                "p2": obj.get("p2", ""),
-                                "p3": obj.get("p3", "")
-                            }
+                        data = yaml.safe_load(f) or {}
+                        print("=== DEBUG YAML loaded type:", type(data))
+                        import pprint; pprint.pprint(data)
+                        if not isinstance(data, dict):
+                            raise ValueError(f"YAML root must be a dict, got {type(data)}")
+
+                    for name, tmpl in (data.get("templates") or {}).items():
+                        self.templates[name] = {
+                            "p1": tmpl.get("p1", ""),
+                            "p2": tmpl.get("p2", ""),
+                            "p3": tmpl.get("p3", "")
+                        }
+
+                    for entry in (data.get("prompts") or []):
+                        
+                        print("=== DEBUG entry type:", type(entry), entry)
+
+                        q = entry.get("question", "").strip()
+                        if not q:
+                            continue
+
+                        base = {}
+                        tmpl_name = entry.get("template")
+                        if tmpl_name and tmpl_name in self.templates:
+                            base = self.templates[tmpl_name].copy()
+
+                        self.prompts[q] = {
+                            "p1": entry.get("p1") or base.get("p1", ""),
+                            "p2": entry.get("p2") or base.get("p2", ""),
+                            "p3": entry.get("p3") or base.get("p3", ""),
+                        }
+
+                        print("=== DEBUG: self.prompts ===")
+                        import pprint; pprint.pprint(self.prompts)
+
             except Exception as e:
-                logger.warning("Failed to load custom prompts from %s: %s", filepath, e)
+                print(f"⚠️ Failed to load YAML prompts from {filepath}: {e}")
 
     @staticmethod
-    def _default_p1(question: str, answer: str) -> str:
-        return (
-            "Inspect the following Question and Answer.\n"
-            "Task: Provide a short evaluation of the Answer, focusing only on specificity, detail, and usability, plus main weaknesses.\n\n"
-            "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.\n"
-            "The first character must be '{' and the last must be '}'.\n"
-            "Do NOT include ```json, ``` or any code fences.\n"
-            "Never output placeholders like <label> or <string>. If uncertain, use \"Medium\".\n\n"
-            "Allowed labels: Very High, High, Medium, Low, Very Low.\n"
-            "Required JSON keys (4 total): specificity, detail, usability, weaknesses.\n"
-            "Rules:\n"
-            "- specificity, detail, usability → one allowed label each.\n"
-            "- weaknesses → short free-text string (≤ 140 chars).\n"
-            "- Never output an empty string or placeholder for weaknesses.\n\n"
-            "Example:\n"
-            "{\"specificity\":\"Low\",\"detail\":\"Medium\",\"usability\":\"Low\",\"weaknesses\":\"Too vague and lacks numeric values.\"}\n\n"
-            f"Question: {question}\n"
-            f"Answer: {answer}\n"
-        )
-
-    @staticmethod
-    def _safe_prev(prev: str) -> str:
-        """Ensure prev is valid JSON string; return '{}' if invalid."""
+    def _safe_prev(prev: Optional[str]) -> str:
         if not prev:
             return "{}"
         try:
@@ -229,100 +244,20 @@ class PromptBuilder:
         except Exception:
             return "{}"
 
-    @staticmethod
-    def _default_p2(prev: str, question: str, answer: str) -> str:
-        prev_json = PromptBuilder._safe_prev(prev)
-        return (
-            "Inspect the Question, Answer, and prior Analysis.\n"
-            "Task: Decide whether the Answer contains enough information to fully and practically address the Question.\n"
-            "Assess based on: coverage of all asked parts, concrete specifics (numbers, names, steps, conditions), reasoning/evidence, stated assumptions, constraints/edge cases, and actionability.\n\n"
-            "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.\n"
-            "The first character must be '{' and the last must be '}'.\n"
-            "Do NOT include ```json, ``` or any code fences.\n"
-            "Never output placeholders like <label> or <string>. If uncertain, use \"Medium\".\n\n"
-            "Allowed labels: Very High, High, Medium, Low, Very Low.\n"
-            "Required JSON keys (4 total): completeness, clarity, relevance, weaknesses.\n"
-            "Rules:\n"
-            "- completeness, clarity, relevance → one allowed label each.\n"
-            "- weaknesses → short free-text string (≤ 140 chars).\n"
-            "- Never output an empty string or placeholder for weaknesses.\n\n"
-            "Example:\n"
-            "{\"completeness\":\"Low\",\"clarity\":\"Medium\",\"relevance\":\"High\",\"weaknesses\":\"No numeric target and lacks supporting context.\"}\n\n"
-            f"Question: {question}\n"
-            f"Answer: {answer}\n"
-            f"Analysis: {prev_json}\n"
-        )
-
-    @staticmethod
-    def _default_p3(prev: str, question: str, answer: str) -> str:
-        prev_json = PromptBuilder._safe_prev(prev)
-        return (
-            "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.\n"
-            "The first character must be '{' and the last must be '}'.\n"
-            "No prose. Do NOT include ```json, ``` or any code fences.\n"
-            "Never output placeholders like <label> or <string>. If uncertain, use \"Medium\".\n"
-            "Task: Judge how well the Answer addresses the Question using the Question, Answer, and Analysis.\n\n"
-            "Allowed labels: Very High, High, Medium, Low, Very Low.\n"
-            "Required JSON keys (7 total): detail, specificity, usability, clarity, completeness, relevance, overall_score.\n"
-            "Rules:\n"
-            "- detail, specificity, usability, clarity, completeness, relevance → one allowed label each, chosen ONLY from the Allowed labels.\n"
-            "- overall_score → MUST be computed, not guessed. Strictly follow this procedure:\n"
-            "  • Convert each label to a number: Very High=95, High=80, Medium=60, Low=40, Very Low=20.\n"
-            "  • Take the average of all 6 values with equal weight.\n"
-            "  • Round to the nearest integer.\n"
-            "  • Clamp the result to 0–100.\n"
-            "  • Never output an overall_score that is inconsistent with the 6 labels.\n\n"
-            "Example:\n"
-            "{\"detail\":\"Low\",\"specificity\":\"Low\",\"usability\":\"Low\","
-            "\"clarity\":\"Low\",\"completeness\":\"Low\",\"relevance\":\"Medium\",\"overall_score\":43}\n\n"
-            "If conflicts exist between Analysis and the actual Q&A, prioritize the Q&A.\n"
-            f"Question: {question}\n"
-            f"Answer: {answer}\n"
-            f"Analysis: {prev_json}\n"
-        )
-
-    # ---------- 統一 get ----------
     def get(self, question: str, stage: str, answer: str, prev: Optional[str] = None) -> str:
         q = question.strip()
-        prev = prev.strip() if prev else "{}"
+        prev_json = self._safe_prev(prev)
 
-        if stage == "p1":
-            return self._default_p1(question, answer)
-        if stage == "p3":
-            return self._default_p3(prev, question, answer)
+        tmpl = self.prompts.get(q, {}).get(stage)
+        if tmpl:
+            return tmpl.format(question=question, answer=answer, prev_json=prev_json)
 
-        if q in self.prompts and stage in self.prompts[q] and self.prompts[q][stage]:
-            tmpl = self.prompts[q][stage]
-            if stage == "p1":
-                tmpl += (
-                    "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid. "
-                    "The first character must be '{' and the last must be '}'. "
-                    "Do NOT include ```json, ``` or any code fences."
-                    "Return EXACTLY ONE JSON object on a SINGLE LINE. No code fences. No prose.\n"
-                    f"Question: {question}\n"
-                    f"Answer: {answer}\n"
-                )
-            else:
-                tmpl += (
-                    "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid. "
-                    "The first character must be '{' and the last must be '}'. "
-                    "Do NOT include ```json, ``` or any code fences."
-                    "Return EXACTLY ONE JSON object on a SINGLE LINE. No code fences. No prose.\n"
-                    f"Question: {question}\n"
-                    f"Answer: {answer}\n"
-                    f"Analysis: {prev}\n"
-                )
-            return tmpl
+        tmpl = self.templates.get("default", {}).get(stage)
+        if tmpl:
+            return tmpl.format(question=question, answer=answer, prev_json=prev_json)
 
-        # fallback → デフォルト
-        if stage == "p1":
-            return self._default_p1(question, answer)
-        elif stage == "p2":
-            return self._default_p2(prev, question, answer)
-        elif stage == "p3":
-            return self._default_p3(prev, question, answer)
-        else:
-            raise ValueError(f"Unknown stage: {stage}")
+        short_q = (q[:50] + "...") if len(q) > 50 else q
+        raise ValueError(f"No prompt found for stage='{stage}' (question='{short_q}')")
 
 # --------------------------------
 # JSON Extractor / Validator (6-axis + overall)
@@ -345,10 +280,16 @@ class JsonExtractor:
         if not text:
             return ""
         t = text.strip()
+
         # strip code fences if present
         m = FENCE_RE.search(t)
         if m:
             t = m.group(1).strip()
+
+        # drop leading junk tokens like ":", "Output:", etc.
+        # 例: ": { ... }", "Output: {...}"
+        t = re.sub(r'^(?:\s*[:\-]*\s*Output\s*[:\-]*\s*|\s*[:]+)', '', t, flags=re.IGNORECASE)
+
         # unwrap accidental quoted JSON
         if len(t) >= 2 and t[0] == '"' and t[-1] == '"':
             inner = t[1:-1]
@@ -356,7 +297,8 @@ class JsonExtractor:
                 return bytes(inner, "utf-8").decode("unicode_escape")
             except Exception:
                 return inner
-        return t
+
+        return t.strip()
 
     @staticmethod
     def _find_matching_brace(s: str, start: int) -> int:
@@ -731,7 +673,8 @@ class QAEvaluator:
         self.adapter = adapter
         self.renderer = renderer
         self.prompt_logger = prompt_logger
-        self.prompt_builder = PromptBuilder("prompts.jsonl")
+        # self.prompt_builder = PromptBuilder("prompts.jsonl")
+        self.prompt_builder = PromptBuilder("prompts.yaml")
 
     @staticmethod
     def gemma_prompt(user_block: str) -> str:
@@ -796,7 +739,7 @@ class QAEvaluator:
         out1 = _strip_phatic(_safe_trim(out1, cfg.prev_max_chars))
 
         if self.renderer and not cfg.quiet:
-            self.renderer.text_panel("Prompt #1 Output (sanitized, possibly truncated)", out1, "cyan")
+            self.renderer.text_panel("Prompt #1 Output (sanitized, possibly truncated)", out1, "yellow")
         if self.prompt_logger:
             self.prompt_logger.log(item_id=item_id, stage="p1", kind="output", text=out1)
 
@@ -815,7 +758,7 @@ class QAEvaluator:
         out2 = _strip_phatic(_safe_trim(out2, cfg.prev_max_chars))
 
         if self.renderer and not cfg.quiet:
-            self.renderer.text_panel("Prompt #2 Output (sanitized, possibly truncated)", out2, "magenta")
+            self.renderer.text_panel("Prompt #2 Output (sanitized, possibly truncated)", out2, "yellow")
         if self.prompt_logger:
             self.prompt_logger.log(item_id=item_id, stage="p2", kind="output", text=out2)
 
@@ -849,7 +792,7 @@ class QAEvaluator:
                 self.prompt_logger.log(item_id=item_id, stage="p3", kind="output", text=sanitized, attempt=attempts)
 
             if self.renderer and not cfg.quiet:
-                self.renderer.text_panel(f"Prompt #3 Output (attempt {attempts})", sanitized, "magenta")
+                self.renderer.text_panel(f"Prompt #3 Output (attempt {attempts})", sanitized, "yellow")
 
             parsed = JsonExtractor.try_extract_json(sanitized)
             if parsed is None:
@@ -923,6 +866,7 @@ class BatchProcessor:
         input_jsonl: str,
         output_jsonl: Optional[str],
         out_csv: Optional[str],
+        out_yaml: Optional[str],
         dump_failed: Optional[str],
         cfg: EvalConfig,
         continue_on_error: bool,
@@ -932,6 +876,8 @@ class BatchProcessor:
         line_no = 0
         out_f = None
         try:
+            records = []
+
             if output_jsonl:
                 _ensure_parent_dir(output_jsonl)
                 out_f = open(output_jsonl, "a", encoding="utf-8")
@@ -945,11 +891,15 @@ class BatchProcessor:
                     raw = raw.strip()
                     if not raw:
                         continue
+                    
                     try:
                         obj = json.loads(raw)
                         question = obj.get("question") or BASE_QUESTION
                         answer = obj.get("answer") or BASE_ANSWER
                         item_id = obj.get("id", f"line{line_no}")
+                        completeness = obj.get("completeness") or "N/A"
+                        followup = obj.get("followup") or "N/A"
+
                     except Exception as e:
                         logger.exception("Failed to parse JSON on line %d: %s", line_no, e)
                         if not continue_on_error:
@@ -977,9 +927,9 @@ class BatchProcessor:
                         else:
                             continue
 
-                    record = {"id": item_id, "question": question, "answer": answer, "canonical": canonical}
-                    if meta:
-                        record["meta"] = meta
+                    record = {"id": item_id, "question": question, "answer": answer, "canonical": canonical, "expected completeness" : completeness, "followup question" : followup}
+
+                    records.append(record)
 
                     if out_f:
                         out_f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -993,6 +943,18 @@ class BatchProcessor:
         finally:
             if out_f:
                 out_f.close()
+
+        if out_yaml and records:
+            _ensure_parent_dir(out_yaml)
+            try:
+                with open(out_yaml, "w", encoding="utf-8") as out_yaml_f:
+                    yaml.safe_dump(records, out_yaml_f, allow_unicode=True, sort_keys=False, width=sys.maxsize)
+            except Exception:
+                logger.exception("Failed to write YAML output file.")
+            finally:
+                if out_yaml_f:
+                    out_yaml_f.close()
+
         return processed
 
 # --------------------------------
@@ -1038,6 +1000,7 @@ class App:
         p.add_argument("--prev-max-chars", type=int, default=2000, help="Max chars to inject from previous outputs into later prompts")
 
         p.add_argument("--out-csv", type=str, help="Optional CSV file to append canonical JSON results")
+        p.add_argument("--out-yaml", type=str, help="Optional YAML file to append canonical YAML results")
         p.add_argument("--dump-failed", type=str, help="Optional file path to append sanitized final outputs when JSON extraction fails")
         p.add_argument("--question", type=str, help="Override built-in question text")
         p.add_argument("--answer", type=str, help="Override built-in answer text")
@@ -1046,16 +1009,12 @@ class App:
         p.add_argument("--output-jsonl", type=str, help="Optional path to append per-item canonical JSONL results")
         p.add_argument("--batch-continue-on-error", action="store_true", help="When batch processing, continue on per-line error")
 
-        p.add_argument("--fallback-policy", choices=["retry-only", "none"], default="retry-only",
-                       help="retry-only: model-only retries then fail; none: no retry, fail immediately")
-        p.add_argument("--final-retries", type=int, default=3,
-                       help="number of model-only retries when final JSON is invalid (ignored if --fallback-policy=none)")
+        p.add_argument("--fallback-policy", choices=["retry-only", "none"], default="retry-only", help="retry-only: model-only retries then fail; none: no retry, fail immediately")
+        p.add_argument("--final-retries", type=int, default=1, help="number of model-only retries when final JSON is invalid (ignored if --fallback-policy=none)")
 
         # Prompt logging
-        p.add_argument("--prompts-jsonl", type=str, default=None,
-                       help="If set, append all prompt I/O logs to this JSONL file.")
-        p.add_argument("--prompts-dir", type=str, default=None,
-                       help="If set, write per-item prompt logs to DIR/<id>.prompts.jsonl.")
+        p.add_argument("--prompts-jsonl", type=str, default=None, help="If set, append all prompt I/O logs to this JSONL file.")
+        p.add_argument("--prompts-dir", type=str, default=None, help="If set, write per-item prompt logs to DIR/<id>.prompts.jsonl.")
         return p.parse_args()
 
     @staticmethod
@@ -1118,6 +1077,7 @@ class App:
                     input_jsonl=args.input_jsonl,
                     output_jsonl=args.output_jsonl,
                     out_csv=args.out_csv,
+                    out_yaml=args.out_yaml,
                     dump_failed=args.dump_failed,
                     cfg=eval_cfg,
                     continue_on_error=args.batch_continue_on_error,

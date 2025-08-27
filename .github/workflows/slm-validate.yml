@@ -84,16 +84,17 @@ jobs:
           python main.py \
             --model "$MODEL_PATH" \
             --input-jsonl _input_survey_.jsonl \
-            --output-jsonl results.jsonl \
-            --prompts-jsonl all.prompts.jsonl \
-            --out-csv results.csv \
+            --out-yaml OUT_eval_results.yaml \
+            --output-jsonl OUT_results.jsonl \
+            --prompts-jsonl OUT_all_prompts.jsonl \
+            --out-csv OUT_results.csv \
             --quiet-batch
 
       - name: Generate OUTPUT from JSONL
         shell: bash
         run: |
           set -euo pipefail
-          python jsonl_to_readme.py results.jsonl --out OUTPUT.md --title "QA Evaluation Results (Model-Only)."
+          python jsonl_to_readme.py OUT_results.jsonl --out OUT_README.md --title "QA Evaluation Results (Model-Only)."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -101,26 +102,26 @@ jobs:
         with:
           name: slm-results
           path: |
-            results.jsonl
-            results.csv
-            OUTPUT.md
-            logs/**
+            OUT_results.jsonl
+            OUT_results.csv
+            OUT_eval_results.yaml
+            OUT_README.md
           if-no-files-found: ignore
 
       # Optional: 追加で all.prompts.jsonl → README を作る場合
-      - name: (Optional) Generate PROMPTS.md from all.prompts.jsonl
+      - name: (Optional) Generate PROMPTS.md from OUT_all_prompts.jsonl
         if: ${{ success() && hashFiles('all_prompts_to_readme.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          python all_prompts_to_readme.py all.prompts.jsonl PROMPTS.md      
+          python all_prompts_to_readme.py OUT_all_prompts.jsonl OUT_PROMPTS.md      
 
       - name: Upload prompts README (optional)
         uses: actions/upload-artifact@v4
         if: ${{ always() }}
         with:
           name: slm-prompts
-          path: PROMPTS.md
+          path: OUT_PROMPTS.md
           if-no-files-found: ignore
 
       # Optional: auto-commit README & outputs back to the repo
@@ -130,4 +131,4 @@ jobs:
         with:
           commit_message: "CI: update OUTPUT from JSONL"
           add_options: '-A'
-          file_pattern: "OUTPUT.md PROMPTS.md results.jsonl all.prompts.jsonl"
+          file_pattern: "OUT_README.md OUT_PROMPTS.md OUT_results.jsonl OUT_all_prompts.jsonl OUT_eval_results.yaml OUT_results.csv"
