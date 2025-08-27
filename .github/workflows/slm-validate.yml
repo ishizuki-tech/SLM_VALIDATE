@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
-      contents: write   # README/成果物のコミットに必要
+      contents: write
 
     steps:
       - name: Checkout
@@ -42,15 +42,14 @@ jobs:
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
           else
-            # 最低限。llama-cpp-python はビルドが走る可能性あり（CPU想定）
-            pip install -U llama-cpp-python rich
+            pip install -U llama-cpp-python rich pyyaml
           fi
 
       - name: Cache models
         uses: actions/cache@v4
         with:
           path: models
-          key: models-${{ hashFiles('download.sh') }}
+          key: models-${{ runner.os }}-${{ hashFiles('download.sh') }}
           restore-keys: |
             models-
 
@@ -63,11 +62,11 @@ jobs:
           chmod +x download.sh
           ./download.sh -d models --verify
 
-      - name: Clean previous outputs (fresh run)
+      - name: Clean previous outputs
         shell: bash
         run: |
           set -euo pipefail
-          rm -f results.jsonl results.csv OUTPUT.md || true
+          rm -f OUT_results.jsonl OUT_results.csv OUT_eval_results.yaml OUT_README.md OUT_PROMPTS.md OUT_all_prompts.jsonl || true
           rm -rf logs runs || true
           mkdir -p logs runs
 
@@ -108,13 +107,12 @@ jobs:
             OUT_README.md
           if-no-files-found: ignore
 
-      # Optional: 追加で all.prompts.jsonl → README を作る場合
-      - name: (Optional) Generate PROMPTS.md from OUT_all_prompts.jsonl
+      - name: Generate PROMPTS.md (optional)
         if: ${{ success() && hashFiles('all_prompts_to_readme.py') != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          python all_prompts_to_readme.py OUT_all_prompts.jsonl OUT_PROMPTS.md      
+          python all_prompts_to_readme.py OUT_all_prompts.jsonl OUT_PROMPTS.md || true
 
       - name: Upload prompts README (optional)
         uses: actions/upload-artifact@v4
@@ -124,11 +122,15 @@ jobs:
           path: OUT_PROMPTS.md
           if-no-files-found: ignore
 
-      # Optional: auto-commit README & outputs back to the repo
-      - name: Commit OUTPUT (optional)
+      - name: Commit outputs back to repo
         if: ${{ success() }}
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "CI: update OUTPUT from JSONL"
-          add_options: '-A'
-          file_pattern: "OUT_README.md OUT_PROMPTS.md OUT_results.jsonl OUT_all_prompts.jsonl OUT_eval_results.yaml OUT_results.csv"
+          commit_message: "CI: update outputs from JSONL"
+          file_pattern: |
+            OUT_eval_results.yaml
+            OUT_results.jsonl
+            OUT_results.csv
+            OUT_README.md
+            OUT_PROMPTS.md
+            OUT_all_prompts.jsonl

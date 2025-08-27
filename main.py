@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-main.py — Model-only labeling (6-axis + overall), class-based refactor (Gemma-ready, pure-JSON)
+main.py — Model-only labeling (6-axis + overall), YAML-driven prompts (Gemma-ready)
 
-This version implements:
- - Final output is a flat 6-axis JSON + overall_score:
-   {detail,specificity,usability,clarity,completeness,relevance,overall_score}
- - Strict validator for the 6-axis schema with optional overall_score; if present,
-   it must be exactly consistent with the 6 labels (equal-weight average, rounded).
- - Robust sanitize/extract/repair loop for p3; retries with concise repair instructions.
- - p1/p2 produce "analysis-like" JSON; p2 is validated, else "{}" is passed to p3.
- - Prompt logging for p1/p2/p3 inputs/outputs/repairs/accepted (JSONL or per-id files).
- - Gemma turn wrapper and stop sequences handled in one place.
+Features
+- Final output: flat 6-axis JSON + overall_score
+  {detail, specificity, usability, clarity, completeness, relevance, overall_score}
+- Strict schema validator and overall_score consistency check
+- Robust sanitize/extract/repair loop for the final (p3) step
+- p1/p2 produce "analysis-like" JSON; if invalid, "{}" is passed forward
+- YAML prompt builder with per-question overrides and default template fallback
+- Prompt logging to JSONL (global and/or per-item)
+- Optional rich console rendering
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import signal
 import yaml
 
 from pathlib import Path
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 # --------------------------------
-# optional rich UI
+# Rich UI (optional)
 # --------------------------------
 _RICH_AVAILABLE = False
 try:
@@ -52,11 +52,10 @@ try:
     from rich.json import JSON as RichJSON  # type: ignore
     _RICH_AVAILABLE = True
 except Exception:
-    _RICH_AVAILABLE = False
     Console = None  # type: ignore
 
 # --------------------------------
-# llama_cpp optional import
+# llama_cpp (optional)
 # --------------------------------
 _LLAMACPP_AVAILABLE = False
 try:
@@ -64,14 +63,12 @@ try:
     _LLAMACPP_AVAILABLE = True
 except Exception:
     Llama = None  # type: ignore
-    _LLAMACPP_AVAILABLE = False
 
 # --------------------------------
 # Defaults
 # --------------------------------
 BASE_QUESTION = "After planting, what share of seeds do you expect to grow into healthy plants?"
 BASE_ANSWER = "Most of them came up fine."
-
 FENCE_RE = re.compile(r"```(?:json)?\s*([\s\S]*?)\s*```", re.IGNORECASE)
 
 EXIT_OK = 0
@@ -85,8 +82,7 @@ EXIT_SINGLE_NO_JSON = 4
 def _ensure_parent_dir(path: Optional[str]) -> None:
     if not path:
         return
-    p = Path(path)
-    parent = p.parent
+    parent = Path(path).parent
     if str(parent) and not parent.exists():
         parent.mkdir(parents=True, exist_ok=True)
 
@@ -97,18 +93,18 @@ def _safe_trim(s: str, limit: int) -> str:
     s2 = b.decode("utf-8", "ignore")
     return s2.rsplit("\n", 1)[0] + "\n[...]"
 
-def _one_line(s: str) -> str:
-    return " ".join((s or "").split())
-
 def _strip_phatic(text: str) -> str:
-    """p1/p2/p3 出力から前置き語をざっくり除去。"""
+    """Remove phatic expressions like 'Thanks...' or 'Here is the analysis:'."""
     if not text:
         return ""
     t = text.strip()
     patterns = [
-        r"^thanks[^.]*\.\s*", r"^thank you[^.]*\.\s*", r"^sure[^.]*\.\s*",
-        r"^great[^.]*\.\s*", r"^here(?:'s| is)\s+the\s+analysis[:\-\s]*",
-        r"^analysis[:\-\s]*"
+        r"^thanks[^.]*\.\s*",
+        r"^thank you[^.]*\.\s*",
+        r"^sure[^.]*\.\s*",
+        r"^great[^.]*\.\s*",
+        r"^here(?:'s| is)\s+the\s+analysis[:\-\s]*",
+        r"^analysis[:\-\s]*",
     ]
     for pat in patterns:
         t = re.sub(pat, "", t, flags=re.IGNORECASE)
@@ -122,27 +118,19 @@ class PromptLogger:
         self.global_jsonl = global_jsonl
         self.dir_path = dir_path
         if self.global_jsonl:
-            self._ensure_parent_dir(self.global_jsonl)
+            _ensure_parent_dir(self.global_jsonl)
         if self.dir_path:
             Path(self.dir_path).mkdir(parents=True, exist_ok=True)
-
-    @staticmethod
-    def _ensure_parent_dir(path: Optional[str]) -> None:
-        if not path:
-            return
-        p = Path(path).parent
-        if str(p) and not p.exists():
-            p.mkdir(parents=True, exist_ok=True)
-
-    def _per_item_path(self, item_id: str) -> Optional[str]:
-        if not self.dir_path:
-            return None
-        return str(Path(self.dir_path) / f"{item_id}.prompts.jsonl")
 
     @staticmethod
     def _write_line(path: str, line: str) -> None:
         with open(path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+    def _per_item_path(self, item_id: str) -> Optional[str]:
+        if not self.dir_path:
+            return None
+        return str(Path(self.dir_path) / f"{item_id}.prompts.jsonl")
 
     def log(self, *, item_id: str, stage: str, kind: str,
             text: Optional[str] = None,
@@ -166,69 +154,47 @@ class PromptLogger:
             rec["question"] = question
         if answer is not None:
             rec["answer"] = answer
-        line = json.dumps(rec, ensure_ascii=False, separators=(",", ":"))
 
+        line = json.dumps(rec, ensure_ascii=False, separators=(",", ":"))
         if self.global_jsonl:
             self._write_line(self.global_jsonl, line)
         per_item = self._per_item_path(item_id)
         if per_item:
             self._write_line(per_item, line)
 
-import yaml
-
+# --------------------------------
+# PromptBuilder (YAML)
+# --------------------------------
 class PromptBuilder:
-
     def __init__(self, filepath: Optional[str] = None):
         self.templates: Dict[str, Dict[str, str]] = {}
         self.prompts: Dict[str, Dict[str, str]] = {}
+        if filepath and Path(filepath).exists():
+            with open(filepath, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                raise ValueError(f"YAML root must be a dict, got {type(data)}")
 
-        print("=== DEBUG filepath:", filepath)
-        with open(filepath, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        print("=== DEBUG type(data):", type(data))
+            for name, tmpl in (data.get("templates") or {}).items():
+                self.templates[name] = {
+                    "p1": tmpl.get("p1", ""),
+                    "p2": tmpl.get("p2", ""),
+                    "p3": tmpl.get("p3", ""),
+                }
 
-        if filepath:
-            try:
-                p = Path(filepath)
-                if p.exists():
-                    with open(filepath, "r", encoding="utf-8") as f:
-                        data = yaml.safe_load(f) or {}
-                        print("=== DEBUG YAML loaded type:", type(data))
-                        import pprint; pprint.pprint(data)
-                        if not isinstance(data, dict):
-                            raise ValueError(f"YAML root must be a dict, got {type(data)}")
-
-                    for name, tmpl in (data.get("templates") or {}).items():
-                        self.templates[name] = {
-                            "p1": tmpl.get("p1", ""),
-                            "p2": tmpl.get("p2", ""),
-                            "p3": tmpl.get("p3", "")
-                        }
-
-                    for entry in (data.get("prompts") or []):
-                        
-                        print("=== DEBUG entry type:", type(entry), entry)
-
-                        q = entry.get("question", "").strip()
-                        if not q:
-                            continue
-
-                        base = {}
-                        tmpl_name = entry.get("template")
-                        if tmpl_name and tmpl_name in self.templates:
-                            base = self.templates[tmpl_name].copy()
-
-                        self.prompts[q] = {
-                            "p1": entry.get("p1") or base.get("p1", ""),
-                            "p2": entry.get("p2") or base.get("p2", ""),
-                            "p3": entry.get("p3") or base.get("p3", ""),
-                        }
-
-                        print("=== DEBUG: self.prompts ===")
-                        import pprint; pprint.pprint(self.prompts)
-
-            except Exception as e:
-                print(f"⚠️ Failed to load YAML prompts from {filepath}: {e}")
+            for entry in (data.get("prompts") or []):
+                q = (entry.get("question") or "").strip()
+                if not q:
+                    continue
+                base = {}
+                tmpl_name = entry.get("template")
+                if tmpl_name and tmpl_name in self.templates:
+                    base = self.templates[tmpl_name].copy()
+                self.prompts[q] = {
+                    "p1": entry.get("p1") or base.get("p1", ""),
+                    "p2": entry.get("p2") or base.get("p2", ""),
+                    "p3": entry.get("p3") or base.get("p3", ""),
+                }
 
     @staticmethod
     def _safe_prev(prev: Optional[str]) -> str:
@@ -241,19 +207,15 @@ class PromptBuilder:
             return "{}"
 
     def get(self, question: str, stage: str, answer: str, prev: Optional[str] = None) -> str:
-        q = question.strip()
         prev_json = self._safe_prev(prev)
-
+        q = question.strip()
         tmpl = self.prompts.get(q, {}).get(stage)
         if tmpl:
             return tmpl.format(question=question, answer=answer, prev_json=prev_json)
-
         tmpl = self.templates.get("default", {}).get(stage)
         if tmpl:
             return tmpl.format(question=question, answer=answer, prev_json=prev_json)
-
-        short_q = (q[:50] + "...") if len(q) > 50 else q
-        raise ValueError(f"No prompt found for stage='{stage}' (question='{short_q}')")
+        raise ValueError(f"No prompt found for stage='{stage}' (question='{q[:50] + ('...' if len(q) > 50 else '')}')")
 
 # --------------------------------
 # JSON Extractor / Validator (6-axis + overall)
@@ -282,8 +244,7 @@ class JsonExtractor:
         if m:
             t = m.group(1).strip()
 
-        # drop leading junk tokens like ":", "Output:", etc.
-        # 例: ": { ... }", "Output: {...}"
+        # drop leading junk tokens like ":", "Output:", etc. (e.g., ": {...}", "Output: {...}")
         t = re.sub(r'^(?:\s*[:\-]*\s*Output\s*[:\-]*\s*|\s*[:]+)', '', t, flags=re.IGNORECASE)
 
         # unwrap accidental quoted JSON
@@ -350,7 +311,6 @@ class JsonExtractor:
         if not isinstance(v, str):
             return "Very Low"
         s = v.strip()
-        # strict set only (no tail tokens)
         return s if s in JsonExtractor.ALLOWED_LABELS6 else "Very Low"
 
     @staticmethod
@@ -542,8 +502,8 @@ class LlamaAdapter:
             except Exception:
                 params = {}
 
-            call_kwargs = {}
-            call_args = []
+            call_kwargs: Dict[str, Any] = {}
+            call_args: List[Any] = []
             if "prompt" in params:
                 call_kwargs["prompt"] = prompt
             elif "input" in params:
@@ -662,14 +622,13 @@ class ModelInit:
     n_gpu_layers: Optional[int] = None
 
 # --------------------------------
-# QAEvaluator (3-stage chain, p2 validated, strict p3 6-axis+overall + logging)
+# QAEvaluator (3-stage chain, strict p3 6-axis+overall + logging)
 # --------------------------------
 class QAEvaluator:
     def __init__(self, adapter: LlamaAdapter, renderer: Optional[Renderer] = None, prompt_logger: Optional[PromptLogger] = None):
         self.adapter = adapter
         self.renderer = renderer
         self.prompt_logger = prompt_logger
-        # self.prompt_builder = PromptBuilder("prompts.jsonl")
         self.prompt_builder = PromptBuilder("prompts.yaml")
 
     @staticmethod
@@ -720,8 +679,8 @@ class QAEvaluator:
 
         # --- Log Q/A at top (stage p0) ---
         if self.prompt_logger:
-            self.prompt_logger.log(item_id=item_id, stage="p0", kind="qa",
-                                   question=question, answer=answer)
+            self.prompt_logger.log(item_id=item_id, stage="p0", kind="qa", question=question, answer=answer)
+
         # Prompt #1
         p1 = self.prompt_builder.get(question, "p1", answer)
         if self.renderer and not cfg.quiet and self.renderer.console:
@@ -775,11 +734,13 @@ class QAEvaluator:
         parsed: Optional[Dict[str, Any]] = None
 
         while True:
-            raw_out = self._send(p3 if attempts == 0 else self._build_repair_prompt(raw_out, reason),  # type: ignore[name-defined]
-                                 max_tokens=final_tokens,
-                                 temperature=cfg.temperature,
-                                 gen_kwargs=gen_kwargs,
-                                 stop=["<end_of_turn>", "\n<end_of_turn>"])
+            raw_out = self._send(
+                p3 if attempts == 0 else self._build_repair_prompt(raw_out, reason),  # type: ignore[name-defined]
+                max_tokens=final_tokens,
+                temperature=cfg.temperature,
+                gen_kwargs=gen_kwargs,
+                stop=["<end_of_turn>", "\n<end_of_turn>"]
+            )
 
             sanitized = JsonExtractor.sanitize_model_text(raw_out)
             sanitized = _strip_phatic(_safe_trim(sanitized, cfg.prev_max_chars))
@@ -817,12 +778,11 @@ class QAEvaluator:
                 logger.error("Final JSON invalid after %d attempt(s).", attempts + 1)
                 return None
 
-            # prepare reason for repair prompt
             reason = "Invalid schema or inconsistent overall_score; must output exactly the 6 labels plus a consistent overall_score."
             attempts += 1
 
 # --------------------------------
-# Batch Processor（6-axis + overall CSV）
+# Batch Processor（6-axis + overall CSV + YAML）
 # --------------------------------
 class BatchProcessor:
     def __init__(self, evaluator: QAEvaluator, renderer: Optional[Renderer]):
@@ -871,9 +831,8 @@ class BatchProcessor:
         processed = 0
         line_no = 0
         out_f = None
+        records: List[Dict[str, Any]] = []
         try:
-            records = []
-
             if output_jsonl:
                 _ensure_parent_dir(output_jsonl)
                 out_f = open(output_jsonl, "a", encoding="utf-8")
@@ -887,7 +846,7 @@ class BatchProcessor:
                     raw = raw.strip()
                     if not raw:
                         continue
-                    
+
                     try:
                         obj = json.loads(raw)
                         question = obj.get("question") or BASE_QUESTION
@@ -895,7 +854,6 @@ class BatchProcessor:
                         item_id = obj.get("id", f"line{line_no}")
                         completeness = obj.get("completeness") or "N/A"
                         followup = obj.get("followup") or "N/A"
-
                     except Exception as e:
                         logger.exception("Failed to parse JSON on line %d: %s", line_no, e)
                         if not continue_on_error:
@@ -923,8 +881,14 @@ class BatchProcessor:
                         else:
                             continue
 
-                    record = {"id": item_id, "question": question, "answer": answer, "canonical": canonical, "expected completeness" : completeness, "followup question" : followup}
-
+                    record = {
+                        "id": item_id,
+                        "question": question,
+                        "answer": answer,
+                        "canonical": canonical,
+                        "expected completeness": completeness,
+                        "followup question": followup,
+                    }
                     records.append(record)
 
                     if out_f:
@@ -940,6 +904,7 @@ class BatchProcessor:
             if out_f:
                 out_f.close()
 
+        # Formal artifact: YAML (single-file)
         if out_yaml and records:
             _ensure_parent_dir(out_yaml)
             try:
@@ -947,9 +912,6 @@ class BatchProcessor:
                     yaml.safe_dump(records, out_yaml_f, allow_unicode=True, sort_keys=False, width=sys.maxsize)
             except Exception:
                 logger.exception("Failed to write YAML output file.")
-            finally:
-                if out_yaml_f:
-                    out_yaml_f.close()
 
         return processed
 
@@ -996,7 +958,7 @@ class App:
         p.add_argument("--prev-max-chars", type=int, default=2000, help="Max chars to inject from previous outputs into later prompts")
 
         p.add_argument("--out-csv", type=str, help="Optional CSV file to append canonical JSON results")
-        p.add_argument("--out-yaml", type=str, help="Optional YAML file to append canonical YAML results")
+        p.add_argument("--out-yaml", type=str, help="Optional YAML file to write final records (formal artifact)")
         p.add_argument("--dump-failed", type=str, help="Optional file path to append sanitized final outputs when JSON extraction fails")
         p.add_argument("--question", type=str, help="Override built-in question text")
         p.add_argument("--answer", type=str, help="Override built-in answer text")
@@ -1057,17 +1019,6 @@ class App:
             evaluator = QAEvaluator(adapter=adapter, renderer=renderer, prompt_logger=prompt_logger)
             batcher = BatchProcessor(evaluator=evaluator, renderer=renderer)
 
-            meta = {
-                "model_path": args.model,
-                "n_ctx": args.ctx,
-                "n_threads": args.threads,
-                "n_gpu_layers": args.gpu_layers,
-                "fallback_policy": args.fallback_policy,
-                "final_retries": args.final_retries,
-                "top_k": args.top_k,
-                "top_p": args.top_p,
-            }
-
             if args.input_jsonl:
                 processed = batcher.run_jsonl(
                     input_jsonl=args.input_jsonl,
@@ -1077,7 +1028,16 @@ class App:
                     dump_failed=args.dump_failed,
                     cfg=eval_cfg,
                     continue_on_error=args.batch_continue_on_error,
-                    meta=meta,
+                    meta={
+                        "model_path": args.model,
+                        "n_ctx": args.ctx,
+                        "n_threads": args.threads,
+                        "n_gpu_layers": args.gpu_layers,
+                        "fallback_policy": args.fallback_policy,
+                        "final_retries": args.final_retries,
+                        "top_k": args.top_k,
+                        "top_p": args.top_p,
+                    },
                 )
                 logger.info("Batch processing completed. Items processed: %d", processed)
                 return EXIT_OK
