@@ -282,7 +282,7 @@ jobs:
 Add your preferred license (e.g., MIT or Apache-2.0).
 
 
-python csv_to_jsonl.py -i QAPairs.csv -o inputs_survey.jsonl
+python survey_conv_csv_to_jsonl.py -i survey_QAPairs.csv -o inputs_survey.jsonl
 python main.py --model ./models/gemma-3-1b-it-q4_k_m.gguf --input-jsonl inputs_survey.jsonl --output-jsonl results.v2.jsonl --out-yaml OUT_eval_results.v2.yaml --prompts-jsonl logs/all.v2.prompts.jsonl
 
 python main.py --model ./models/gemma-3-1b-it-q4_k_m.gguf --input-jsonl _input_survey_.jsonl --out-yaml OUT_eval_results.yaml --output-jsonl OUT_results.jsonl --prompts-jsonl OUT_all_prompts.jsonl --out-csv OUT_results.csv --batch-continue-on-error --quiet-batch
