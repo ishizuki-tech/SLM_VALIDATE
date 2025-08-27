@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-main.py — Model-only labeling (6-axis), class-based refactor (Gemma-ready, pure-JSON)
+main.py — Model-only labeling (6-axis + overall), class-based refactor (Gemma-ready, pure-JSON)
 
 This version implements:
- - Final output is a flat 6-axis JSON: {detail,specificity,usability,clarity,completeness,relevance}
- - Strict validator for the 6-axis schema only (no numeric scoring, no penalties).
+ - Final output is a flat 6-axis JSON + overall_score:
+   {detail,specificity,usability,clarity,completeness,relevance,overall_score}
+ - Strict validator for the 6-axis schema with optional overall_score; if present,
+   it must be exactly consistent with the 6 labels (equal-weight average, rounded).
  - Robust sanitize/extract/repair loop for p3; retries with concise repair instructions.
  - p1/p2 produce "analysis-like" JSON; p2 is validated, else "{}" is passed to p3.
  - Prompt logging for p1/p2/p3 inputs/outputs/repairs/accepted (JSONL or per-id files).
@@ -61,7 +63,6 @@ try:
 except Exception:
     Llama = None  # type: ignore
     _LLAMACPP_AVAILABLE = False
-
 
 # --------------------------------
 # Defaults
@@ -175,77 +176,168 @@ class PromptLogger:
 # PromptBuilder (Gemma user-blocks; wrapper is applied later)
 # --------------------------------
 class PromptBuilder:
+    def __init__(self, filepath: Optional[str] = None):
+        self.prompts: Dict[str, Dict[str, str]] = {}
+        if filepath:
+            try:
+                p = Path(filepath)
+                if p.exists():
+                    with open(filepath, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            obj = json.loads(line)
+                            q = obj["question"].strip()
+                            self.prompts[q] = {
+                                "p1": obj.get("p1", ""),
+                                "p2": obj.get("p2", ""),
+                                "p3": obj.get("p3", "")
+                            }
+            except Exception as e:
+                logger.warning("Failed to load custom prompts from %s: %s", filepath, e)
 
     @staticmethod
-    # def p1(question: str, answer: str) -> str:
-    #     return (
-    #         "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid. "
-    #         "The first character must be '{' and the last must be '}'. "
-    #         "Do NOT include ```json, ``` or any code fences.\n"
-    #         "Inspect the following Question and Answer. Provide a short analysis."
-    #         "stating whether the answer is specific, detailed, and usable. Mention the main weaknesses.\n"
-    #         f"Question: {question}\n"
-    #         f"Answer: {answer}\n"
-    #     )
-    def p1(question: str, answer: str) -> str:
+    def _default_p1(question: str, answer: str) -> str:
         return (
-            "Inspect the following Question and Answer. Provide a short analysis.\n"
-            "stating whether the answer is specific, detailed, and usable. Mention the main weaknesses.\n"
-            "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid. "
-            "The first character must be '{' and the last must be '}'. "
-            "Do NOT include ```json, ``` or any code fences."
-            "Return EXACTLY ONE JSON object on a SINGLE LINE. No code fences. No prose.\n"
+            "Inspect the following Question and Answer.\n"
+            "Task: Provide a short evaluation of the Answer, focusing only on specificity, detail, and usability, plus main weaknesses.\n\n"
+            "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.\n"
+            "The first character must be '{' and the last must be '}'.\n"
+            "Do NOT include ```json, ``` or any code fences.\n"
+            "Never output placeholders like <label> or <string>. If uncertain, use \"Medium\".\n\n"
+            "Allowed labels: Very High, High, Medium, Low, Very Low.\n"
+            "Required JSON keys (4 total): specificity, detail, usability, weaknesses.\n"
+            "Rules:\n"
+            "- specificity, detail, usability → one allowed label each.\n"
+            "- weaknesses → short free-text string (≤ 140 chars).\n"
+            "- Never output an empty string or placeholder for weaknesses.\n\n"
+            "Example:\n"
+            "{\"specificity\":\"Low\",\"detail\":\"Medium\",\"usability\":\"Low\",\"weaknesses\":\"Too vague and lacks numeric values.\"}\n\n"
             f"Question: {question}\n"
             f"Answer: {answer}\n"
         )
 
     @staticmethod
-    def p2(prev1_oneline_json: Optional[str], question: str = BASE_QUESTION, answer: str = BASE_ANSWER) -> str:
-        prev = prev1_oneline_json.strip() if isinstance(prev1_oneline_json, str) and prev1_oneline_json.strip() else "{}"
-        return (
-            "Inspect the Question, Answer, and prior Analysis. Decide whether the Answer contains enough information "
-            "to fully and practically address the Question.\n"
-            "Assess: coverage of all asked parts, concrete specifics (numbers, names, steps, conditions), reasoning/evidence, "
-            "stated assumptions, constraints/edge cases, and actionability.\n"
-            "Return EXACTLY ONE JSON object on a SINGLE LINE. No code fences. No prose.\n"
-            f"Question: {question}\n"
-            f"Answer: {answer}\n"
-            f"Analysis: {prev}\n"
-        )
-
-        # return (
-        #     "Inspect the following Question and Answer and Analysis. Provide a detailed analysis.\n"
-        #     "Stating whether the answer is specific, detailed, and usable. Mention the main weaknesses.\n"
-        #     "Return EXACTLY ONE JSON object on a SINGLE LINE. No code fences. No prose.\n"
-        #     f"Question: {question}\n"
-        #     f"Answer: {answer}\n"
-        #     f"Analysis: {prev}\n"
-        # )
+    def _safe_prev(prev: str) -> str:
+        """Ensure prev is valid JSON string; return '{}' if invalid."""
+        if not prev:
+            return "{}"
+        try:
+            parsed = json.loads(prev)
+            return json.dumps(parsed, ensure_ascii=False)
+        except Exception:
+            return "{}"
 
     @staticmethod
-    def p3(prev2_oneline_json: Optional[str], question: str, answer: str) -> str:
-        prev = prev2_oneline_json.strip() if isinstance(prev2_oneline_json, str) and prev2_oneline_json.strip() else "{}"
+    def _default_p2(prev: str, question: str, answer: str) -> str:
+        prev_json = PromptBuilder._safe_prev(prev)
         return (
-            "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid. "
-            "The first character must be '{' and the last must be '}'. "
-            "No prose. Do NOT include ```json, ``` or any code fences. "
+            "Inspect the Question, Answer, and prior Analysis.\n"
+            "Task: Decide whether the Answer contains enough information to fully and practically address the Question.\n"
+            "Assess based on: coverage of all asked parts, concrete specifics (numbers, names, steps, conditions), reasoning/evidence, stated assumptions, constraints/edge cases, and actionability.\n\n"
+            "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.\n"
+            "The first character must be '{' and the last must be '}'.\n"
+            "Do NOT include ```json, ``` or any code fences.\n"
+            "Never output placeholders like <label> or <string>. If uncertain, use \"Medium\".\n\n"
+            "Allowed labels: Very High, High, Medium, Low, Very Low.\n"
+            "Required JSON keys (4 total): completeness, clarity, relevance, weaknesses.\n"
+            "Rules:\n"
+            "- completeness, clarity, relevance → one allowed label each.\n"
+            "- weaknesses → short free-text string (≤ 140 chars).\n"
+            "- Never output an empty string or placeholder for weaknesses.\n\n"
+            "Example:\n"
+            "{\"completeness\":\"Low\",\"clarity\":\"Medium\",\"relevance\":\"High\",\"weaknesses\":\"No numeric target and lacks supporting context.\"}\n\n"
+            f"Question: {question}\n"
+            f"Answer: {answer}\n"
+            f"Analysis: {prev_json}\n"
+        )
+
+    @staticmethod
+    def _default_p3(prev: str, question: str, answer: str) -> str:
+        prev_json = PromptBuilder._safe_prev(prev)
+        return (
+            "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid.\n"
+            "The first character must be '{' and the last must be '}'.\n"
+            "No prose. Do NOT include ```json, ``` or any code fences.\n"
             "Never output placeholders like <label> or <string>. If uncertain, use \"Medium\".\n"
-            "Task: Judge how well the Answer addresses the Question using the Question, Answer, and Analysis.\n"
-            "Allowed labels for all fields: Very High, High, Medium, Low, Very Low.\n"
-            "Required JSON keys: detail, specificity, usability, clarity, completeness, relevance. "
-            "Each key must map to one allowed label.\n"
+            "Task: Judge how well the Answer addresses the Question using the Question, Answer, and Analysis.\n\n"
+            "Allowed labels: Very High, High, Medium, Low, Very Low.\n"
+            "Required JSON keys (7 total): detail, specificity, usability, clarity, completeness, relevance, overall_score.\n"
+            "Rules:\n"
+            "- detail, specificity, usability, clarity, completeness, relevance → one allowed label each, chosen ONLY from the Allowed labels.\n"
+            "- overall_score → MUST be computed, not guessed. Strictly follow this procedure:\n"
+            "  • Convert each label to a number: Very High=95, High=80, Medium=60, Low=40, Very Low=20.\n"
+            "  • Take the average of all 6 values with equal weight.\n"
+            "  • Round to the nearest integer.\n"
+            "  • Clamp the result to 0–100.\n"
+            "  • Never output an overall_score that is inconsistent with the 6 labels.\n\n"
+            "Example:\n"
+            "{\"detail\":\"Low\",\"specificity\":\"Low\",\"usability\":\"Low\","
+            "\"clarity\":\"Low\",\"completeness\":\"Low\",\"relevance\":\"Medium\",\"overall_score\":43}\n\n"
             "If conflicts exist between Analysis and the actual Q&A, prioritize the Q&A.\n"
             f"Question: {question}\n"
             f"Answer: {answer}\n"
-            f"Analysis: {prev}\n"
+            f"Analysis: {prev_json}\n"
         )
 
+    # ---------- 統一 get ----------
+    def get(self, question: str, stage: str, answer: str, prev: Optional[str] = None) -> str:
+        q = question.strip()
+        prev = prev.strip() if prev else "{}"
+
+        if stage == "p1":
+            return self._default_p1(question, answer)
+        if stage == "p3":
+            return self._default_p3(prev, question, answer)
+
+        if q in self.prompts and stage in self.prompts[q] and self.prompts[q][stage]:
+            tmpl = self.prompts[q][stage]
+            if stage == "p1":
+                tmpl += (
+                    "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid. "
+                    "The first character must be '{' and the last must be '}'. "
+                    "Do NOT include ```json, ``` or any code fences."
+                    "Return EXACTLY ONE JSON object on a SINGLE LINE. No code fences. No prose.\n"
+                    f"Question: {question}\n"
+                    f"Answer: {answer}\n"
+                )
+            else:
+                tmpl += (
+                    "Output ONLY raw JSON on a SINGLE LINE. Any other text is invalid. "
+                    "The first character must be '{' and the last must be '}'. "
+                    "Do NOT include ```json, ``` or any code fences."
+                    "Return EXACTLY ONE JSON object on a SINGLE LINE. No code fences. No prose.\n"
+                    f"Question: {question}\n"
+                    f"Answer: {answer}\n"
+                    f"Analysis: {prev}\n"
+                )
+            return tmpl
+
+        # fallback → デフォルト
+        if stage == "p1":
+            return self._default_p1(question, answer)
+        elif stage == "p2":
+            return self._default_p2(prev, question, answer)
+        elif stage == "p3":
+            return self._default_p3(prev, question, answer)
+        else:
+            raise ValueError(f"Unknown stage: {stage}")
+
 # --------------------------------
-# JSON Extractor / Validator (6-axis only)
+# JSON Extractor / Validator (6-axis + overall)
 # --------------------------------
+LABEL_TO_POINTS = {
+    "Very High": 95,
+    "High": 80,
+    "Medium": 60,
+    "Low": 40,
+    "Very Low": 20,
+}
+
 class JsonExtractor:
     # 6-axis constants
-    ALLOWED_LABELS6 = {"Very High", "High", "Medium", "Low", "Very Low"}
+    ALLOWED_LABELS6 = set(LABEL_TO_POINTS.keys())
     FIELDS6 = ["detail", "specificity", "usability", "clarity", "completeness", "relevance"]
 
     @staticmethod
@@ -358,12 +450,27 @@ class JsonExtractor:
             out[k] = JsonExtractor._coerce_label6(node.get(k, "Very Low"))
         return out
 
+    # ---- scoring (equal weights, integer 0–100) ----
+    @staticmethod
+    def score_from_labels6(labels: Dict[str, str]) -> Optional[int]:
+        if not isinstance(labels, dict):
+            return None
+        vals: List[int] = []
+        for k in JsonExtractor.FIELDS6:
+            v = labels.get(k)
+            if v not in LABEL_TO_POINTS:
+                return None
+            vals.append(LABEL_TO_POINTS[v])
+        avg = sum(vals) / len(vals)
+        score = int(round(max(0, min(100, avg))))
+        return score
+
     @staticmethod
     def final_schema_ok(obj: Any) -> bool:
         """
-        Strict 6-axis final JSON validation.
-        Schema: top-level keys = detail, specificity, usability, clarity, completeness, relevance
-        Values must be exactly one of {Very High, High, Medium, Low, Very Low}, no newlines, ≤140 chars.
+        Strict 6-axis final JSON validation with optional overall_score.
+        Schema (required): detail, specificity, usability, clarity, completeness, relevance
+        Optional: overall_score (int 0–100), which MUST match the equal-weight average of the 6 labels if present.
         """
         if not isinstance(obj, dict):
             return False
@@ -374,6 +481,16 @@ class JsonExtractor:
             if not isinstance(val, str) or "\n" in val or len(val) > 140:
                 return False
             if val not in JsonExtractor.ALLOWED_LABELS6:
+                return False
+
+        if "overall_score" in obj:
+            v = obj["overall_score"]
+            if not isinstance(v, int):
+                return False
+            if v < 0 or v > 100:
+                return False
+            expected = JsonExtractor.score_from_labels6(obj)  # uses labels from obj
+            if expected is None or v != expected:
                 return False
         return True
 
@@ -542,7 +659,7 @@ class LlamaAdapter:
         return "[LLM_CALL_ERROR] unsupported call signature"
 
 # --------------------------------
-# Renderer（6-axis only）
+# Renderer（6-axis + overall）
 # --------------------------------
 class Renderer:
     def __init__(self, use_rich: bool):
@@ -562,12 +679,14 @@ class Renderer:
             return
 
         self.console.rule(Text(" Six-axis Labels ", style="bold white on blue"))
-        table = Table(title="Labels (6 axes)", box=box.SIMPLE_HEAVY)
+        table = Table(title="Labels (6 axes + overall)", box=box.SIMPLE_HEAVY)
         table.add_column("Dimension", style="bold")
-        table.add_column("Label", justify="center")
+        table.add_column("Label / Score", justify="center")
         order = ["specificity", "detail", "usability", "clarity", "completeness", "relevance"]
         for k in order:
             table.add_row(k.title(), str(canonical.get(k, "Medium")))
+        if "overall_score" in canonical:
+            table.add_row("Overall Score", str(canonical["overall_score"]))
         self.console.print(table)
         self.console.rule("End of evaluation")
 
@@ -605,13 +724,14 @@ class ModelInit:
     n_gpu_layers: Optional[int] = None
 
 # --------------------------------
-# QAEvaluator (3-stage chain, p2 validated, strict p3 6-axis + logging)
+# QAEvaluator (3-stage chain, p2 validated, strict p3 6-axis+overall + logging)
 # --------------------------------
 class QAEvaluator:
     def __init__(self, adapter: LlamaAdapter, renderer: Optional[Renderer] = None, prompt_logger: Optional[PromptLogger] = None):
         self.adapter = adapter
         self.renderer = renderer
         self.prompt_logger = prompt_logger
+        self.prompt_builder = PromptBuilder("prompts.jsonl")
 
     @staticmethod
     def gemma_prompt(user_block: str) -> str:
@@ -629,6 +749,33 @@ class QAEvaluator:
             kw["stop"] = stop
         return self.adapter.generate(prompt, max_tokens=max_tokens, temperature=temperature, **kw)
 
+    def _compute_final_tokens(self, cfg: EvalConfig) -> int:
+        if cfg.final_max_tokens is not None:
+            return cfg.final_max_tokens
+        # clamp 120..400 around base max_tokens
+        return max(120, min(400, cfg.max_tokens))
+
+    def _build_repair_prompt(self, raw_prev: str, reason: str) -> str:
+        return (
+            "Your previous output did not comply with the strict final schema.\n"
+            "Repair it and output ONLY one JSON object on a SINGLE LINE.\n"
+            "Schema keys: detail, specificity, usability, clarity, completeness, relevance, overall_score\n"
+            "Rules for overall_score:\n"
+            "- Map labels to points: Very High=95, High=80, Medium=60, Low=40, Very Low=20\n"
+            "- Equal-weight average of 6 axes, round to nearest integer, clamp 0–100\n"
+            "- Score must exactly match labels\n\n"
+            f"Reason: {reason}\n"
+            f"Previous output:\n{raw_prev}\n"
+        )
+
+    def _accept(self, obj: Dict[str, Any]) -> Dict[str, Any]:
+        """Return canonical dict with all 6 labels + overall_score (computed if missing)."""
+        labels = JsonExtractor.canonicalize_labels6(obj)
+        score = JsonExtractor.score_from_labels6(labels)
+        if score is not None:
+            labels["overall_score"] = score
+        return labels
+
     def evaluate(self, question: str, answer: str, cfg: EvalConfig, item_id: str = "single") -> Optional[Dict[str, Any]]:
         gen_kwargs = cfg.gen_kwargs or {}
 
@@ -636,9 +783,8 @@ class QAEvaluator:
         if self.prompt_logger:
             self.prompt_logger.log(item_id=item_id, stage="p0", kind="qa",
                                    question=question, answer=answer)
-
         # Prompt #1
-        p1 = PromptBuilder.p1(question, answer)
+        p1 = self.prompt_builder.get(question, "p1", answer)
         if self.renderer and not cfg.quiet and self.renderer.console:
             self.renderer.console.rule(Text("Prompt #1 — Quick inspection (Gemma)", style="bold cyan"))
             self.renderer.console.print(Panel(Text(p1), title="Prompt #1 (user content)", style="cyan", box=box.ROUNDED))
@@ -654,8 +800,10 @@ class QAEvaluator:
         if self.prompt_logger:
             self.prompt_logger.log(item_id=item_id, stage="p1", kind="output", text=out1)
 
+        prev_out = out1
+
         # Prompt #2
-        p2 = PromptBuilder.p2(out1, question, answer)
+        p2 = self.prompt_builder.get(question, "p2", answer, prev_out)
         if self.renderer and not cfg.quiet and self.renderer.console:
             self.renderer.console.rule(Text("Prompt #2 — Next inspection (Gemma)", style="bold magenta"))
             self.renderer.console.print(Panel(Text(p2), title="Prompt #2 (user content)", style="magenta", box=box.ROUNDED))
@@ -671,87 +819,71 @@ class QAEvaluator:
         if self.prompt_logger:
             self.prompt_logger.log(item_id=item_id, stage="p2", kind="output", text=out2)
 
-        # Validate p2 (analysis-like). If invalid JSON or schema error -> pass "{}" to p3.
-        prev_for_p3 = out2
+        prev_out = out2
 
-        # Prompt #3 (Final 6-axis JSON)
-        p3 = PromptBuilder.p3(prev_for_p3, question, answer)
+        # Prompt #3 (Final 6-axis JSON + overall_score)
+        p3 = self.prompt_builder.get(question, "p3", answer, prev_out)
+        final_tokens = self._compute_final_tokens(cfg)
+
         if self.renderer and not cfg.quiet and self.renderer.console:
             self.renderer.console.rule(Text("Prompt #3 — Final JSON evaluation (Gemma)", style="bold green"))
             self.renderer.console.print(Panel(Text(p3), title="Prompt #3 (user content)", style="green", box=box.ROUNDED))
         if self.prompt_logger:
             self.prompt_logger.log(item_id=item_id, stage="p3", kind="prompt", text=p3, attempt=0)
 
-        final_tokens = cfg.final_max_tokens if cfg.final_max_tokens is not None else max(120, min(400, cfg.max_tokens))
-
-        # --- robust final loop: strict validation -> (optional) repair+retry ---
         attempts = 0
-        prompt_round = p3
-        while True:
-            out3_raw = self._send(
-                prompt_round,
-                max_tokens=final_tokens,
-                temperature=cfg.temperature,
-                gen_kwargs=gen_kwargs,
-                stop=["<end_of_turn>", "\n<end_of_turn>"]
-            )
+        raw_out = ""
+        parsed: Optional[Dict[str, Any]] = None
 
-            out3 = JsonExtractor.sanitize_model_text(out3_raw)
-            out3 = _strip_phatic(_safe_trim(out3, cfg.prev_max_chars))
+        while True:
+            raw_out = self._send(p3 if attempts == 0 else self._build_repair_prompt(raw_out, reason),  # type: ignore[name-defined]
+                                 max_tokens=final_tokens,
+                                 temperature=cfg.temperature,
+                                 gen_kwargs=gen_kwargs,
+                                 stop=["<end_of_turn>", "\n<end_of_turn>"])
+
+            sanitized = JsonExtractor.sanitize_model_text(raw_out)
+            sanitized = _strip_phatic(_safe_trim(sanitized, cfg.prev_max_chars))
 
             if self.prompt_logger:
-                self.prompt_logger.log(item_id=item_id, stage="p3", kind="output", text=out3, attempt=attempts)
+                self.prompt_logger.log(item_id=item_id, stage="p3", kind="output", text=sanitized, attempt=attempts)
 
             if self.renderer and not cfg.quiet:
-                self.renderer.text_panel("Prompt #3 Output (sanitized, possibly truncated)", out3, "magenta")
+                self.renderer.text_panel(f"Prompt #3 Output (attempt {attempts})", sanitized, "magenta")
 
-            parsed: Optional[Dict[str, Any]] = JsonExtractor.try_extract_json(out3)
+            parsed = JsonExtractor.try_extract_json(sanitized)
             if parsed is None:
                 try:
-                    parsed = json.loads(out3)
+                    parsed = json.loads(sanitized)
                 except Exception:
                     parsed = None
 
-            canonical: Optional[Dict[str, Any]] = None
             if isinstance(parsed, dict):
-                # Strict 6-axis
+                # Valid?
                 if JsonExtractor.final_schema_ok(parsed):
-                    canonical = JsonExtractor.canonicalize_labels6(parsed)
-                else:
-                    # Try recover from analysis-like shapes
-                    recovered = JsonExtractor.analysis_like_to_labels6(parsed)
-                    if recovered is not None and JsonExtractor.final_schema_ok(recovered):
-                        canonical = JsonExtractor.canonicalize_labels6(recovered)
+                    canonical = self._accept(parsed)
+                    if self.prompt_logger:
+                        self.prompt_logger.log(item_id=item_id, stage="p3", kind="accepted", text="final 6-axis+overall json", attempt=attempts, extra={"canonical": canonical})
+                    return canonical
+                # Try from analysis-like
+                recovered = JsonExtractor.analysis_like_to_labels6(parsed)
+                if recovered is not None and JsonExtractor.final_schema_ok(recovered):
+                    canonical = self._accept(recovered)
+                    if self.prompt_logger:
+                        self.prompt_logger.log(item_id=item_id, stage="p3", kind="accepted", text="recovered 6-axis+overall json", attempt=attempts, extra={"canonical": canonical})
+                    return canonical
 
-            if canonical is not None:
-                if self.prompt_logger:
-                    self.prompt_logger.log(item_id=item_id, stage="p3", kind="accepted",
-                                           text="final 6-axis json",
-                                           attempt=attempts,
-                                           extra={"canonical": canonical})
-                return canonical
-
-            if cfg.fallback_policy != "retry-only" or attempts >= max(0, int(cfg.final_retries)):
+            # Need repair?
+            if cfg.fallback_policy != "retry-only" or attempts >= cfg.final_retries:
+                logger.error("Final JSON invalid after %d attempt(s).", attempts + 1)
                 return None
 
-            # repair instruction (6-axis only, no schema example)
+            # prepare reason for repair prompt
+            reason = "Invalid schema or inconsistent overall_score; must output exactly the 6 labels plus a consistent overall_score."
             attempts += 1
-            bad_oneline = _one_line(_safe_trim(out3, cfg.prev_max_chars))
-            repair = (
-                "You previously returned invalid output. "
-                "RETURN EXACTLY ONE VALID JSON OBJECT ON A SINGLE LINE. "
-                "Keys required: detail, specificity, usability, clarity, completeness, relevance. "
-                "Each value must be exactly one of {Very High, High, Medium, Low, Very Low}. "
-                "Never output placeholders like <label>. If uncertain or missing, use \"Medium\". "
-                "No prose, no code fences, no extra text.\n"
-                f"Previous invalid output:\n{bad_oneline}\n"
-            )
-            if self.prompt_logger:
-                self.prompt_logger.log(item_id=item_id, stage="p3", kind="repair", text=repair, attempt=attempts)
-            prompt_round = p3 + "\n" + repair
 
 # --------------------------------
-# Batch Processor（6-axis CSV）
+# Batch Processor（6-axis + overall CSV）
 # --------------------------------
 class BatchProcessor:
     def __init__(self, evaluator: QAEvaluator, renderer: Optional[Renderer]):
@@ -767,6 +899,7 @@ class BatchProcessor:
                 writer.writerow([
                     "id",
                     "specificity","detail","usability","clarity","completeness","relevance",
+                    "overall_score",
                     "canonical_json",
                     "question",
                     "answer",
@@ -779,6 +912,7 @@ class BatchProcessor:
                 canonical.get("clarity",""),
                 canonical.get("completeness",""),
                 canonical.get("relevance",""),
+                canonical.get("overall_score",""),
                 json.dumps(canonical, ensure_ascii=False, separators=(",", ":")),
                 question,
                 answer,
@@ -882,7 +1016,7 @@ class App:
 
     @staticmethod
     def parse_args() -> argparse.Namespace:
-        p = argparse.ArgumentParser(description="Three-stage chained QA evaluator (final 6-axis JSON output, model-only).")
+        p = argparse.ArgumentParser(description="Three-stage chained QA evaluator (final 6-axis + overall_score JSON output, model-only).")
         p.add_argument("--model", "-m", required=True, help="Path to model file (.gguf/.bin)")
         p.add_argument("--ctx", type=int, default=1024, help="n_ctx for Llama")
         p.add_argument("--threads", type=int, default=4, help="n_threads for Llama")

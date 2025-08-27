@@ -83,7 +83,7 @@ jobs:
           echo "Using model: $MODEL_PATH"
           python main.py \
             --model "$MODEL_PATH" \
-            --input-jsonl survey_inputs_00.jsonl \
+            --input-jsonl _input_survey_.jsonl \
             --output-jsonl results.jsonl \
             --prompts-jsonl all.prompts.jsonl \
             --out-csv results.csv \
