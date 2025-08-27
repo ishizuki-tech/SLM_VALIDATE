@@ -1,0 +1,65 @@
+- id: line1
+  question: What would you consider to be an early maturing maize variety?
+  answer: Variety that i can harvest before short rains end in my area
+  canonical:
+    detail: Low
+    specificity: Low
+    usability: Low
+    clarity: Low
+    completeness: Low
+    relevance: Medium
+    overall_score: 20
+  expected completeness: incomplete
+  followup question: When do short rains start and end in your area?
+- id: line2
+  question: What would you consider to be an early maturing maize variety?
+  answer: One that allows me to plant another crop in the same season
+  canonical:
+    detail: Low
+    specificity: Very Low
+    usability: Low
+    clarity: Low
+    completeness: Low
+    relevance: Medium
+    overall_score: 20
+  expected completeness: incomplete
+  followup question: How many days should this variety take to mature to allow you to plant another crop in the same season?
+- id: line3
+  question: What would you consider to be an early maturing maize variety?
+  answer: Variety that i can harvest before pest destroy it
+  canonical:
+    detail: Medium
+    specificity: Low
+    usability: Low
+    clarity: Low
+    completeness: Low
+    relevance: High
+    overall_score: 35
+  expected completeness: incomplete
+  followup question: Within how many days does the maize need to mature to avoid being damaged by those pests?
+- id: line4
+  question: What would you consider to be an early maturing maize variety?
+  answer: Any variety that matures within 3 months
+  canonical:
+    detail: High
+    specificity: Medium
+    usability: Low
+    clarity: Low
+    completeness: Medium
+    relevance: High
+    overall_score: 45
+  expected completeness: Complete
+  followup question: N/A
+- id: line5
+  question: What would you consider to be an early maturing maize variety?
+  answer: One that I can harvest before the rains stop
+  canonical:
+    detail: Low
+    specificity: Very Low
+    usability: Low
+    clarity: Medium
+    completeness: Low
+    relevance: High
+    overall_score: 20
+  expected completeness: incomplete
+  followup question: How many months or days of rain do you usually get in your area?
