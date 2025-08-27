@@ -102,10 +102,11 @@ jobs:
         with:
           name: slm-results
           path: |
-            OUT_results.jsonl
-            OUT_results.csv
+            OUT_all_prompts.json
             OUT_eval_results.yaml
             OUT_README.md
+            OUT_results.csv
+            OUT_results.jsonl
           if-no-files-found: ignore
 
       - name: Generate PROMPTS.md (optional)
@@ -129,9 +130,9 @@ jobs:
         with:
           commit_message: "CI: update outputs from JSONL"
           file_pattern: |
-            OUT_eval_results.yaml
-            OUT_results.jsonl
-            OUT_results.csv
-            OUT_README.md
-            OUT_PROMPTS.md
             OUT_all_prompts.jsonl
+            OUT_eval_results.yaml
+            OUT_PROMPTS.md
+            OUT_README.md
+            OUT_results.csv
+            OUT_results.jsonl
