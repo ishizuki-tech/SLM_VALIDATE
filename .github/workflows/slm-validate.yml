@@ -124,15 +124,23 @@ jobs:
           path: OUT_PROMPTS.md
           if-no-files-found: ignore
 
+      - name: Show outputs & git status (debug)
+        if: ${{ success() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== ls -al =="
+          ls -al
+          echo "== git status (before) =="
+          git status
+          echo "== preview add (intent-to-add) =="
+          git add -N OUT_* || true
+          git status
+
       - name: Commit outputs back to repo
         if: ${{ success() }}
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "CI: update outputs from JSONL"
-          file_pattern: |
-            OUT_all_prompts.jsonl
-            OUT_eval_results.yaml
-            OUT_PROMPTS.md
-            OUT_README.md
-            OUT_results.csv
-            OUT_results.jsonl
+          add_options: "-A"
+          file_pattern: "OUT_*"
